@@ -20,6 +20,7 @@ import sys
 # from rosbag2_py_ import SequentialReader, StorageOptions, ConverterOptions
 from zed_interfaces.msg import Object, ObjectsStamped
 from rclpy.serialization import deserialize_message
+from typing import Optional
 
 class ObjectFollower(Node):
     def __init__(self):
@@ -86,11 +87,14 @@ class ObjectFollower(Node):
             - If less than desired stopping distance, then velocity is set to 0
             - If more than desired stopping distance, then velocity is 1.0 (Might want to explore if we are following object of arbitrary orientation)
         """
+        if self.odometry is None:
+            return
+
         # Get Odometry from zed_camera_center to map frame
         # Get position of zed_camera_center in map frame coordinates based on current odometry mmessage
-        self.p_map_cameracenter = np.array([self.odometry.pose.pose.position.x,
-                                            self.odometry.pose.pose.position.y,
-                                            self.odometry.pose.pose.position.z
+        self.p_map_cameracenter = np.array([self.odometry.position.x,
+                                            self.odometry.position.y,
+                                            self.odometry.position.z
                                             ])
 
         # TODO: Get rotation of zed_camera_center to map frame - this is for following an object not directly in front
@@ -110,6 +114,8 @@ class ObjectFollower(Node):
         # Get Object bounding box(es) from ObjectsStamped in msg - it contains a list of Object in map frame
         # Note: If there are more than one Object, take pick closest distance object, this way no false positive (even for race track challenge)
         nearest_obj = self._get_nearest_object(msg)
+        if nearest_obj is None:
+            return
         obj_corners = self._get_object_corners(nearest_obj)  # Get corners from object
         p_map_object = self._get_center_from_corners(obj_corners)  # Get center of object in map frame
 
@@ -136,7 +142,7 @@ class ObjectFollower(Node):
         shadow_marker.header.stamp = self.get_clock().now().to_msg()
         shadow_marker.ns = "debug"
         shadow_marker.id = 0
-        shadow_marker.marker_type = Marker.SPHERE
+        shadow_marker.type = Marker.SPHERE
         shadow_marker.action= Marker.ADD
         shadow_marker.scale.x = 0.1
         shadow_marker.scale.y = 0.1
@@ -145,6 +151,12 @@ class ObjectFollower(Node):
         shadow_marker.color.r = 0.0
         shadow_marker.color.g = 1.0
         shadow_marker.color.b = 0.0
+        
+        shadow_marker_point = Point() 
+        shadow_marker_point.x = p_map_object[0]
+        shadow_marker_point.y = p_map_object[1]
+        shadow_marker_point.z = 0.0
+        shadow_marker.points = [shadow_marker_point]
         self.shadow_publisher.publish(shadow_marker)
 
         # For debugging - Publish Arrow from camera_center shadow to object shadow
@@ -153,16 +165,18 @@ class ObjectFollower(Node):
         arrow_marker.header.stamp = self.get_clock().now().to_msg()
         arrow_marker.ns = "debug"
         arrow_marker.id = 1
-        arrow_marker.marker_type = Marker.ARROW
+        arrow_marker.type = Marker.ARROW
         arrow_marker.action= Marker.ADD
+        arrow_marker.scale.x = 0.1
+        arrow_marker.scale.y = 0.1
         start_point = Point()
         start_point.x = self.p_map_cameracenter[0]
         start_point.y = self.p_map_cameracenter[1]
-        start_point.z = 0
+        start_point.z = 0.0
         end_point = Point()
         end_point.x = p_map_object[0]
         end_point.y = p_map_object[1]
-        end_point.z = 0
+        end_point.z = 0.0
         arrow_marker.points = [start_point, end_point]
         arrow_marker.color.a = 1.0
         arrow_marker.color.r = 0.0
@@ -171,13 +185,16 @@ class ObjectFollower(Node):
 
         self.camera_obj_arrow_publisher.publish(arrow_marker)
 
-    def _get_nearest_object(self, msg: ObjectsStamped) -> Object:
+    def _get_nearest_object(self, msg: ObjectsStamped) -> Optional[Object]:
         """
         Given a msg containing ObjectsStamped, pick out the Object with the minimum distance from current position to object.
         """
-        objects = np.array([[obj.position[0].items(), 
-                             obj.position[1].items(), 
-                             obj.position[2].items()] for obj in msg.objects])
+        if len(msg.objects) == 0:
+            return None
+
+        objects = np.array([[obj.position[0], 
+                             obj.position[1], 
+                             obj.position[2]] for obj in msg.objects])
 
         # Calculate L2 Distance from camera center to each object
         distances = np.linalg.norm(objects - self.p_map_cameracenter, axis=1)
