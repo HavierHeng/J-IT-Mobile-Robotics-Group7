@@ -28,3 +28,7 @@ This assumes the `ros_ws` from the earlier practical is already built.
 
 7. Start the node to control the car: `ros2 run object_follower_hw obj_visualizer`
     - Make sure the car is in autonomous mode by pressing the joycon
+
+The normal version of the node runs this logic in a nutshell, it only moves straight via bang bang control of linear x velocity:
+
+![Drive Straight and stop at bag](./hw4_diagram.png)
