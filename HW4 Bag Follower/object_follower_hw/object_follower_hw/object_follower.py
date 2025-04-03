@@ -88,6 +88,7 @@ class ObjectFollower(Node):
             - If more than desired stopping distance, then velocity is 1.0 (Might want to explore if we are following object of arbitrary orientation)
         """
         if self.odometry is None:
+            self.get_logger().warn("No odometry data received yet")
             return
 
         # Get Odometry from zed_camera_center to map frame
@@ -96,20 +97,6 @@ class ObjectFollower(Node):
                                             self.odometry.position.y,
                                             self.odometry.position.z
                                             ])
-
-        # TODO: Get rotation of zed_camera_center to map frame - this is for following an object not directly in front
-        # Task : Get the quaternion of the base_footprint frame in the map frame based on the current odometry message. 
-        # Hints: Functions you can use from transformation
-        # self.q_map_cameracenter = np.array([self.odometry.pose.pose.orientation.x,
-        #                                     self.odometry.pose.pose.orientation.y,
-        #                                     self.odometry.pose.pose.orientation.z,
-        #                                     self.odometry.pose.pose.orientation.w
-        #                                     ])
-        # tr.quaternion_matrix converts form quaternion to rotation matrix
-        # self.R_map_cameracenter = tr.quaternion_matrix()[0:3, 0:3]
-        # self.q_map_basescan = tr.quaternion_multiply()
-        # Note: A@B performs matrix multiplication between numpy matrices A and B, whereas A*B is element-wise multiplication
-        # self.p_map_basescan = self.p_map_basefootprint + self.R_map_basefootprint @ self.p_basefootprint_basescan
 
         # Get Object bounding box(es) from ObjectsStamped in msg - it contains a list of Object in map frame
         # Note: If there are more than one Object, take pick closest distance object, this way no false positive (even for race track challenge)
