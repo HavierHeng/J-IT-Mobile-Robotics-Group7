@@ -1,10 +1,11 @@
 # To run HW4 Part 2
 
-This assumes the `ros_ws` from the earlier practical is already built.
 
-1. Make new package: `ros2 pkg create --build-type ament_python object_follower_hw`
+This assumes the `ros_ws` workspace from the earlier practical is already built.
 
-2. Put python file with the Node implementation into new package
+1. Copy the obj_det_visualizer in the HW4 folder into the `~/ros2_ws/src/` as a new package
+
+2. cd into the `~/ros2_ws` workspace.
 
 3. Colcon build the new package: `colon build --symlink-install --packages-select object_follower_hw`
     - Recommendation: Avoid building all packages, as it may include extra things already built - Zed2 takes quite long to do so.
@@ -26,7 +27,7 @@ This assumes the `ros_ws` from the earlier practical is already built.
     - Start the given visualizer for bounding boxes: `ros2 run obj_det_visualizer obj_visualizer`
     - Start RViz2, you should see a camera view and world view with marker representing the 3D bounding box from Zed2 object detection: `rviz2`
 
-7. Start the node to control the car: `ros2 run object_follower_hw simple_follower`
+7. Start the node to control the car: `ros2 run object_follower_hw straight_follower`
     - Make sure the car is in autonomous mode by pressing the joycon
 
 The normal version of the node runs this logic in a nutshell, it only moves straight via bang bang control of linear x velocity:
