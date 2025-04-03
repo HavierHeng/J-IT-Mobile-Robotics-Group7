@@ -1,2 +1,2 @@
-# J-IT-Mobile-Robotics-Group7
+# Mobile Robotics - Autonomous Car
 Kachow
