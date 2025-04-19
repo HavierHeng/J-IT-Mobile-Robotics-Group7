@@ -1,283 +1,194 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
+
+# Inspired by this approach: https://github.com/sinyeopgo/ROS-2-simulation/blob/main/my_pkg/src/lanefollowing.cpp
+# Minor improvements include: 
+# - PID controller instead of the hardcoded parameters - this allows us to tune it on the race track
+# - Region of interest masking - to filter out any excess background blobs - we can do this by effective applying an AND bitmask via polyfill 0 - this is as we know that the race track blobs are only on the lower half of the image. We want to ensure we only ever detect 2 blobs for the most part.
+
+
+# No lanenet/DL methods - The downside of this dumb method vs LaneNet DL model is that we cannot estimate the exact metric distance we are to the lanes in the world. Its an approximation via pixel distance, there is no scaling.
+
+# Raw OpenCV - Take an image, greyscale and increase threshold to increase brightness of left and right lanes
+# Abuses cv2.connectedComponentWithStats: https://pyimagesearch.com/2021/02/22/opencv-connected-component-labeling-and-analysis/
+# In theory, there are only 2 main blobs/components at max - the left and right lane markers. This way, we can identify if we are to the left or right of the lane by taking their centroids. We can try to ensure the best candidates for left and right markers are tracked via a threshold
+# CTE is calculated via taking the diff between the left and right centroids and the middle. 
+# PID
+
 import rclpy
-import rclpy.duration
-from rclpy.node import Node 
-import tf_transformations as tr
-import tf2_ros
-from tf2_ros import TransformBroadcaster
-from std_msgs.msg import String, Header, ColorRGBA, Float32
-from nav_msgs.msg import OccupancyGrid, MapMetaData, Odometry
-from geometry_msgs.msg import Twist, PoseStamped, Point
-from sensor_msgs.msg import LaserScan
-from visualization_msgs.msg import Marker
-from math import sqrt, cos, sin, pi, atan2, log ,exp
-from threading import Thread, Lock
-from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSReliabilityPolicy
-from rclpy.qos import QoSProfile
-import random
+from rclpy.node import Node
+from sensor_msgs.msg import Image
+from geometry_msgs.msg import Twist
+from cv_bridge import CvBridge
+import cv2
 import numpy as np
-import sys
-# from rosbag2_py_ import SequentialReader, StorageOptions, ConverterOptions
-from zed_interfaces.msg import Object, ObjectsStamped
-from rclpy.serialization import deserialize_message
-from typing import Optional
 
-class TrackFollower(Node):
+class PID:
+    def __init__(self, Kp, Kd, Ki, dt=0.01):
+        self.Kp = Kp
+        self.Kd = Kd
+        self.Ki = Ki
+        self.dt = dt  # delta time for PID calculations in seconds (e.g 0.01s is 10ms)
+        self.prev_error = 0.0
+        self.integral = 0.0
+        self.correction = 0.0
+
+    def update_control(self, current_error):
+        # Calculate PID components
+        self.integral += current_error * self.dt
+        derivative = (current_error - self.prev_error) / self.dt
+        self.correction = self.Kp * current_error + self.Kd * derivative + self.Ki * self.integral
+        self.prev_error = current_error
+
+    def get_control(self):
+        return self.correction
+
+class LaneFollowing(Node):
     def __init__(self):
-        super().__init__("TrackFollower")
+        super().__init__('lanefollowing')
+        # Initialize CvBridge - To convert ROS Image messages to CV messages for processing via OpenCV
+        self.bridge = CvBridge()
 
-        # Pseudocode for straights:
-        # Take bottom half of greyscale image
-        # Threshold it to binary
-        # Divide into left and right halves
-        # Count white pixels on each side: a (left), b (right)
-        # cte = (a - b) / (a + b + epsilon)
-        # angular.z = -Kp * cte
-        # linear.x = constant_throttle
+        # Initialize variables
+        self.prevpt1 = np.array([0.0, 0.0])
+        self.prevpt2 = np.array([0.0, 0.0])
+        self.error = 0.0
 
-        # Proportional CTE controller
-        # Pure Pursuit: Pick a lookahead point, get curvature and compute angular z
-        # Stanley controller: Minimize CTE and heading error - used by google car
+        # Declare PID parameters
+        self.declare_parameter('Kp', 0.0225)  # Proportional gain 
+        self.declare_parameter('Kd', 0.01)    # Derivative gain
+        self.declare_parameter('Ki', 0.0001)  # Integral gain
+        self.declare_parameter('forward_speed', 1)  # Forward speed - In theory, we would want throttle to be 1 (highest speed 1/10 car can tahan)
 
-        # Hint: LaneNet
-        """
-        # Cascaded P-controllers
-        angular_z_heading = Kp_heading * heading_error
-        angular_z_cte = Kp_cte * cte / (speed + ε)
-        cmd_vel.angular.z = angular_z_heading + angular_z_cte
+        Kp = self.get_parameter('Kp').value
+        Kd = self.get_parameter('Kd').value
+        Ki = self.get_parameter('Ki').value
+        self.forward_speed = self.get_parameter('forward_speed').value
 
-        """
+        self.pid_controller = PID(Kp, Kd, Ki)
 
-        """
-        # Stanley controller - geometry based
-        cte = compute_cte(robot_pose, path)
-        heading_error = compute_heading_error(robot_pose, path)
+        # Create subscription to camera images
+        # Use the rectified image from the Zed2 camera
+        self.img_sub = self.create_subscription(
+            Image,
+            '/zed/zed_node/rgb/image_rect_color',  # Use the rectified color image from zed2 (accounts for camera parameters and distortion)
+            self.image_callback,
+            10
+        )
 
-        # 2. Stanley formula
-        steering_angle = heading_error + math.atan2(k * cte, speed + 1e-3)
+        # Create publisher for velocity commands
+        self.cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
 
-        # 3. Apply to robot
-        cmd_vel.angular.z = steering_angle
-        cmd_vel.linear.x = constant_throttle
-        """
+        # Create timer for publishing velocity commands (10ms = 100Hz)
+        self.update_timer = self.create_timer(0.01, self.update_callback)
 
-        self.declare_parameter('stopping_distance_to_object', 1.0)  # Distance for bag to set velocity to 0 (in metres)
-        self.stopping_distance_to_object = self.get_parameter("stopping_distance_to_object").value
+    def create_roi_mask(self, height, width):
+        # Create a trapezoidal mask for ROI
+        mask = np.zeros((height, width), dtype=np.uint8)
+        # Define trapezoid vertices
+        top_width = int(width * 0.2)  # 20% of width at top
+        bottom_width = int(width * 0.8)  # 80% of width at bottom
+        top_y = int(height * 0.4)  # Start at 40% from top
+        bottom_y = height  # Extend to bottom
+        vertices = np.array([
+            [(width - top_width) // 2, top_y],
+            [(width + top_width) // 2, top_y],
+            [(width + bottom_width) // 2, bottom_y],
+            [(width - bottom_width) // 2, bottom_y]
+        ], dtype=np.int32)
+        # Fill the trapezoid with white (255)
+        cv2.fillPoly(mask, [vertices], 255)
+        return mask
 
-        # Subscription - For Zed2 detected objects
-        self.obj_subscription = self.create_subscription(
-                ObjectsStamped, 
-                "/zed/zed_node/obj_det/objects",
-                self.object_callback,
-                10) 
+    def image_callback(self, msg):
+        # Convert ROS Image message to OpenCV format
+        frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+        gray = self.bridge.imgmsg_to_cv2(msg, desired_encoding='mono8')
 
-        # Subscription - For Zed2 Odometry
-        self.odometry = None
-        self.odom_subscription = self.create_subscription(
-                PoseStamped,
-                "/zed/zed_node/pose",
-                self.odom_callback,
-                10)
+        # Create and apply ROI mask
+        mask = self.create_roi_mask(gray.shape[0], gray.shape[1])
+        gray = cv2.bitwise_and(gray, gray, mask=mask)
 
-        # Publish - For telling Car how to drive using Twist
-        self.cmd_publisher = self.create_publisher(Twist, "/cmd_vel", 10)
+        # Adjust grayscale image
+        gray = gray + 100 - np.mean(gray)
+        _, gray = cv2.threshold(gray, 160, 255, cv2.THRESH_BINARY)
 
-        # Publish - For RViz - Shadow Marker for Bounding Box
-        self.shadow_publisher = self.create_publisher(Marker, "/debug/object_shadow", 10)
+        # Select ROI (lower third of the image, already masked)
+        rows, cols = gray.shape
+        dst = gray[rows // 3 * 2:rows, 0:cols]
 
-        # Publish - For RViz - draw an arrow from shadow of zed_camera_center to shadow of bag bounding box
-        self.camera_obj_arrow_publisher = self.create_publisher(Marker, "/debug/object_arrow", 10)
+        # Connected components analysis
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(dst, connectivity=8)
 
-        # Publish - For Debug - Current distance to Object
-        qos_profile = QoSProfile(depth=10)
-        qos_profile.reliability = QoSReliabilityPolicy.RELIABLE
-        qos_profile.durability = QoSDurabilityPolicy.TRANSIENT_LOCAL
-        self.distance_publisher = self.create_publisher(Float32, '/debug/distance_to_object', qos_profile)  # Float32 has data attribute
+        cpt = [np.array([0.0, 0.0]), np.array([0.0, 0.0])]
+        if num_labels > 1:
+            # Track lane markers
+            # ALgorithm works by picking the 2 candidates with the least possible distance from previous cached values for left and right markers (if they are within a reasonable threshold)
+            mindistance1 = []
+            mindistance2 = []
+            for i in range(1, num_labels):
+                p = centroids[i]
+                ptdistance1 = abs(p[0] - self.prevpt1[0])
+                ptdistance2 = abs(p[0] - self.prevpt2[0])
+                mindistance1.append(ptdistance1)
+                mindistance2.append(ptdistance2)
 
-        # Zed2 is able to get odom from ~/pose - it implicitly does EKF with IMU + visual odom
-        # self.tf_buffer = tf2_ros.Buffer()  # Use Buffer for TransformListener
-        # self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+            threshdistance1 = min(mindistance1)
+            threshdistance2 = min(mindistance2)
 
-        # Odometry of camera to map - given by ~/pose
-        self.q_map_cameracenter = None  # quaternion of basefootprint in map frame
-        self.R_map_cameracenter = None  # 3x3 rotation matrix of basefootprint in map frame
-        self.p_map_cameracenter = None  # position of basefootprint in map frame
+            minlb1 = np.argmin(mindistance1)
+            minlb2 = np.argmin(mindistance2)
 
-        # Object Tracking of camera (zed_camera_center) to object
-        # self.q_cameracenter_object = None  # quaternion of basescan in map frame
-        # self.R_cameracenter_object = None  # 3x3 rotation matrix of basescan in map frame
-        # self.p_cameracenter_object = None  # position of basescan in map frame
+            cpt[0] = centroids[minlb1 + 1]
+            cpt[1] = centroids[minlb2 + 1]
 
+            # Use previous points if distance is too large
+            if threshdistance1 > 100:
+                cpt[0] = self.prevpt1
+            if threshdistance2 > 100:
+                cpt[1] = self.prevpt2]
+        else:
+            cpt[0] = self.prevpt1
+            cpt[1] = self.prevpt2
 
-    def odom_callback(self, msg):
-        """
-        PoseStamped from ~/pose from Zed2 to Pose message
-        """
-        self.odometry = msg.pose
-        
-    def object_callback(self, msg):
-        """
-        Main logic - Takes in ObjectStamped which contains multiple Object
-        Calculates how much error between camera to bag and uses that to determine linear velocity to send to /cmd_vel
-            - If less than desired stopping distance, then velocity is set to 0
-            - If more than desired stopping distance, then velocity is 1.0 (Might want to explore if we are following object of arbitrary orientation)
-        """
-        if self.odometry is None:
-            self.get_logger().warn("No odometry data received yet")
-            return
+        # Update previous points
+        self.prevpt1 = cpt[0]
+        self.prevpt2 = cpt[1]
 
-        # Get Odometry from zed_camera_center to map frame
-        # Get position of zed_camera_center in map frame coordinates based on current odometry mmessage
-        self.p_map_cameracenter = np.array([self.odometry.position.x,
-                                            self.odometry.position.y,
-                                            self.odometry.position.z
-                                            ])
+        # Compute midpoint
+        fpt = np.array([(cpt[0][0] + cpt[1][0]) / 2, (cpt[0][1] + cpt[1][1]) / 2 + rows // 3 * 2])
 
-        # Get Object bounding box(es) from ObjectsStamped in msg - it contains a list of Object in map frame
-        # Note: If there are more than one Object, take pick closest distance object, this way no false positive (even for race track challenge)
-        nearest_obj = self._get_nearest_object(msg)
-        if nearest_obj is None:
-            return
-        obj_corners = self._get_object_corners(nearest_obj)  # Get corners from object
-        p_map_object = self._get_center_from_corners(obj_corners)  # Get center of object in map frame
+        # Convert ROI to color for visualization
+        dst = cv2.cvtColor(dst, cv2.COLOR_GRAY2BGR)
 
-        # Take shadow (x, y only) of camera_center and object and calculate distance
-        # Else it be in 3D and subject to the height that the object is seen
-        distance_to_obj = np.linalg.norm(self.p_map_cameracenter[0:1] - p_map_object[0:1])
+        # Draw circles for visualization
+        cv2.circle(frame, (int(fpt[0]), int(fpt[1])), 2, (0, 0, 255), 2)
+        cv2.circle(dst, (int(cpt[0][0]), int(cpt[0][1])), 2, (0, 0, 255), 2)
+        cv2.circle(dst, (int(cpt[1][0]), int(cpt[1][1])), 2, (255, 0, 0), 2)
 
-        # Calculate error between desired stopping distance and current position
-        error = distance_to_obj - self.stopping_distance_to_object 
+        # Compute cross-track error
+        self.error = cols / 2 - fpt[0]
 
-        # Control car (Bang bang control)
-        cmd_msg = Twist()
-        if error > 0:  # Set linear x to 1.0
-            cmd_msg.linear.x = 1.0
-        else:  # Set linear x to zero so it stops moving
-            cmd_msg.linear.x = 0.0
+        # Update PID controller
+        self.pid_controller.update_control(self.error)
 
-        # Publish control
-        self.cmd_publisher.publish(cmd_msg)
+        # Display images - for debugging
+        cv2.imshow('camera', frame)
+        cv2.imshow('gray', dst)
+        cv2.waitKey(1)
 
-        # For debugging - publish shadow of object
-        shadow_marker = Marker()
-        shadow_marker.header.frame_id = "map"  # Coordinate frame
-        shadow_marker.header.stamp = self.get_clock().now().to_msg()
-        shadow_marker.ns = "debug"
-        shadow_marker.id = 0
-        shadow_marker.type = Marker.SPHERE
-        shadow_marker.action= Marker.ADD
-        shadow_marker.scale.x = 0.1
-        shadow_marker.scale.y = 0.1
-        shadow_marker.scale.z = 0.1
-        shadow_marker.color.a = 1.0
-        shadow_marker.color.r = 0.0
-        shadow_marker.color.g = 1.0
-        shadow_marker.color.b = 0.0
-        
-        shadow_marker_point = Point() 
-        shadow_marker_point.x = p_map_object[0]
-        shadow_marker_point.y = p_map_object[1]
-        shadow_marker_point.z = 0.0
-        shadow_marker.points = [shadow_marker_point]
-        self.shadow_publisher.publish(shadow_marker)
-
-        # For debugging - Publish Arrow from camera_center shadow to object shadow
-        arrow_marker = Marker()
-        arrow_marker.header.frame_id = "map"  # Coordinate frame
-        arrow_marker.header.stamp = self.get_clock().now().to_msg()
-        arrow_marker.ns = "debug"
-        arrow_marker.id = 1
-        arrow_marker.type = Marker.ARROW
-        arrow_marker.action= Marker.ADD
-        arrow_marker.scale.x = 0.1
-        arrow_marker.scale.y = 0.1
-        start_point = Point()
-        start_point.x = self.p_map_cameracenter[0]
-        start_point.y = self.p_map_cameracenter[1]
-        start_point.z = 0.0
-        end_point = Point()
-        end_point.x = p_map_object[0]
-        end_point.y = p_map_object[1]
-        end_point.z = 0.0
-        arrow_marker.points = [start_point, end_point]
-        arrow_marker.color.a = 1.0
-        arrow_marker.color.r = 0.0
-        arrow_marker.color.g = 1.0
-        arrow_marker.color.b = 1.0
-
-        self.camera_obj_arrow_publisher.publish(arrow_marker)
-
-    def _get_nearest_object(self, msg: ObjectsStamped) -> Optional[Object]:
-        """
-        Given a msg containing ObjectsStamped, pick out the Object with the minimum distance from current position to object.
-        """
-        if len(msg.objects) == 0:
-            return None
-
-        objects = np.array([[obj.position[0], 
-                             obj.position[1], 
-                             obj.position[2]] for obj in msg.objects])
-
-        # Calculate L2 Distance from camera center to each object
-        distances = np.linalg.norm(objects - self.p_map_cameracenter, axis=1)
-
-        # Find index of closest object
-        k = np.argmin(distances)
-        return msg.objects[k]
-        
-
-    def _get_object_shadow_marker(self, timestamp, frame_id, pts_in_map):
-        """
-        Plot shadow of the middle of 3D Bounding Box
-        """
-        msg = Marker()
-        msg.header.stamp = timestamp
-        msg.header.frame_id = frame_id
-        msg.ns = "shadow_pts"
-        msg.id = 0
-        msg.type = Marker.POINTS
-        msg.action = Marker.ADD
-        msg.points = [Point(x=pt[0], y=pt[1], z=pt[2]) for pt in pts_in_map]
-        msg.colors = [ColorRGBA(r=0.0, g=1.0, b=0.0, a=1.0) for _ in pts_in_map]
-        
-        for pt in pts_in_map:
-            assert ((not np.isnan(pt).any()) and np.isfinite(pt).all())
-        
-        msg.scale.x = 0.04
-        msg.scale.y = 0.04
-        msg.scale.z = 0.04
-        return msg
-
-    def _get_object_corners(self, msg: Object):
-        """
-        Objects which contain BoundingBox3D, which contains Keypoint3D (8 corners), contains 3 Floats
-        """
-        corners_obj = msg.bounding_box_3d.corners  # 8 Corners in an array
-        corners = [[c.kp[0].item(), c.kp[1].item(), c.kp[2].item()] for c in corners_obj]  # item() is since its ROS Float
-        return corners
-
-    def _get_center_from_corners(self, vertices):
-        """
-        Corners is a list of [x, y  z] points making up the cube corners.
-        """
-        points = np.array(vertices)
-        # Calculate the mean along axis 0 (across all points)
-        center = np.mean(points, axis=0)
-        return center.tolist()
-
+    def update_callback(self):
+        # Publish velocity commands
+        cmd_vel = Twist()
+        cmd_vel.linear.x = min(self.forward_speed, 1.0)  # Cap at full throttle of 1.0
+        cmd_vel.angular.z = self.pid_controller.get_control()  # based on PID correction
+        self.cmd_vel_pub.publish(cmd_vel)
 
 def main(args=None):
     rclpy.init(args=args)
-    m = ObjectFollower()
-    try:
-        rclpy.spin(m)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        m.destroy_node()
-        rclpy.shutdown()
+    node = LaneFollowing()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
-    
-
