@@ -87,6 +87,14 @@ The output of this problem is preferably a position of the object in the camera 
 
 Results from our testing show that the `Medium` model does relatively well at detecting humans and cars without having too high load on the Nvidia Jetson.
 
+#### Sub Sub Problem: /cmd_vel throttle might not be equal to how many m/s in real world, IMU as ground truth
+
+While using /cmd_vel works in simulations to update the dynamics model's linear x velocity, this is not the case in a real robot. Putting our throttle to the max value of 1.0 might not correspond 1:1 to the 1.0m/s in physical world assumption. 
+
+Also because when we are testing the robot without battery, our robot is not even self-propelled since we don't actually move the robot via throttle but via carrying it around to simulate movement. 
+
+We need to use a method to calculate the velocity of the robot. This can be done via taking the Zed2's IMU via the topic `/zed/zed_node/imu/data` for `IMU` messages containing the linear acceleration and angular velocity.
+
 ## Assumptions
 
 ### Gaussian Distribution
@@ -130,6 +138,8 @@ y_{t+1} &= y_t + v \cdot \sin(\theta) \cdot \Delta t \\
 \end{aligned}
 $$
 
+> Problem: Throttle being 1.0 (max value) might not actually be 1.0m/s in practice. This means to update the particles with the dynamics might not be as accurate as we expect... Either we record the speed at 1.0m/s as a constant. Or we use some IMU as a fallback. 
+
 ### Measurement model: Position of points in pointcloud
 Rather than use the objects detected as landmarks (we opt for this in our report), the fact that we have a point cloud map means that we can figure out what points are seen in a pointcloud. This can then be used to update our particle's possibly of hypothesis.
 
@@ -141,6 +151,13 @@ All we need to do is to set up the objects, carry the robot around to build a po
 
 Now, we can run our test script, set the initial position of the robot in the world, and then carry it around and let it perform its localization.
 
+## ROS2 Topics for Zed2 camera
+`/zed/zed_node/pose` - `Pose` Camera pose referred to Map frame (complete data fusion applied) - Can be used to get current position in space
+`/cmd_vel` - `Twist` - To control the robot - max throttle is 1.0 (but it doesn't mean its 1.0m/s)
+`
+
+
 ## Bonus Problem: Making SLAM
 
 The problem is stil a manually driven car. The only difference is the lack of a map, instead the car drives around, builds its map, then figures out the position of objects in the map against a fixed world point like an Odom position. It might employ loop closure techniques to fix Odometry.
+
