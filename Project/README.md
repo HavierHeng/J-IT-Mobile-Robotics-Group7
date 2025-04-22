@@ -15,6 +15,9 @@ Another downside is that it fail in scenarios where there are multiple candidate
 ## Method 2: LaneNet DL
 
 The nice thing is that someone has wrapped LaneNet Model into a ROS package: https://github.com/AbangLZU/LaneNetRos
+The bad thing is that its not directly usable - the publisher ROS node that its written in is the older ROS 1 API using `rospy`. 
+
+To have it work with `rclpy` in ROS2, we can basically hijack the internal libraries in the repo, and rewrite the code for the node to directly call the internal tensorflow code.
 
 This uses Deep Neural Network based around image segmentation to guess the lanes. It is a lot smarter than just purely counting pixels and taking their centers.
 
