@@ -45,19 +45,18 @@ class PID:
 class LaneFollowing(Node):
     def __init__(self):
         super().__init__('lanefollowing')
+        self.get_logger().info("LaneFollowing node started")
         # Initialize CvBridge - To convert ROS Image messages to CV messages for processing via OpenCV
         self.bridge = CvBridge()
 
         # Initialize variables
-        self.prevpt1 = np.array([0.0, 0.0])
-        self.prevpt2 = np.array([0.0, 0.0])
         self.error = 0.0
 
         # Declare PID parameters
         self.declare_parameter('Kp', 0.0225)  # Proportional gain 
         self.declare_parameter('Kd', 0.01)    # Derivative gain
         self.declare_parameter('Ki', 0.0001)  # Integral gain
-        self.declare_parameter('forward_speed', 1)  # Forward speed - In theory, we would want throttle to be 1 (highest speed 1/10 car can tahan)
+        self.declare_parameter('forward_speed', 1.0)  # Forward speed - In theory, we would want throttle to be 1 (highest speed 1/10 car can tahan)
 
         Kp = self.get_parameter('Kp').value
         Kd = self.get_parameter('Kd').value
@@ -77,6 +76,12 @@ class LaneFollowing(Node):
 
         # Create publisher for velocity commands
         self.cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
+
+        # Create publisher for high contrast + ROI image + Hough lines
+        self.masked_gray_img_pub = self.create_publisher(Image, 'debug/gray/masked_image', 5)
+
+        # Create publisher for high contrast + ROI image + Hough lines
+        self.masked_color_img_pub = self.create_publisher(Image, 'debug/color/masked_image', 5)
 
         # Create timer for publishing velocity commands (10ms = 100Hz)
         self.update_timer = self.create_timer(0.01, self.update_callback)
@@ -99,82 +104,152 @@ class LaneFollowing(Node):
         cv2.fillPoly(mask, [vertices], 255)
         return mask
 
+    def average_line(self, lines):
+        """
+        Average lines - called on left or right group
+        """
+        if len(lines) == 0:
+            return None
+        x_coords = []
+        y_coords = []
+        for x1, y1, x2, y2 in lines:
+            x_coords.extend([x1, x2])
+            y_coords.extend([y1, y2])
+        return np.polyfit(y_coords, x_coords, 1)  # returns [slope, intercept]
+
     def image_callback(self, msg):
+        """
+        TODO:
+        - Fix the ROI cropping
+        - Tune it somehow (maybe using inRange, or some othe filter) for the actual race track
+        - Find the center of the track
+        - Actually make it move with the PIDs
+        """
         # Convert ROS Image message to OpenCV format
         frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-        gray = self.bridge.imgmsg_to_cv2(msg, desired_encoding='mono8')
+        gray_frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='mono8')
 
         # Create and apply ROI mask
-        mask = self.create_roi_mask(gray.shape[0], gray.shape[1])
-        gray = cv2.bitwise_and(gray, gray, mask=mask)
+        mask = self.create_roi_mask(gray_frame.shape[0], gray_frame.shape[1])
+        gray_masked = cv2.bitwise_and(gray_frame, gray_frame, mask=mask)
+        color_masked = cv2.bitwise_and(frame, frame, mask=mask)
 
-        # Adjust grayscale image
-        gray = gray + 100 - np.mean(gray)
-        _, gray = cv2.threshold(gray, 160, 255, cv2.THRESH_BINARY)
 
-        # Select ROI (lower third of the image, already masked)
-        rows, cols = gray.shape
-        dst = gray[rows // 3 * 2:rows, 0:cols]
+        # Gaussian blur to smooth image
+        # Blurred HSV (Colour)
+        blurred_color = cv2.GaussianBlur(color_masked, (5, 5), 0)
+        hsv = cv2.cvtColor(blurred_color, cv2.COLOR_BGR2HSV)
+        # Blurred Gray (Grayscale)
+        blurred_gray = cv2.GaussianBlur(gray_masked, (5, 5), 0)
 
-        # Connected components analysis
-        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(dst, connectivity=8)
+        # Use Canny edge detection - lower threshold, higher threshold
+        # TODO: Tune and see which value works better
+        hsv_edges = cv2.Canny(hsv, 75, 150)
+        gray_edges = cv2.Canny(blurred_gray, 75, 150)
 
-        cpt = [np.array([0.0, 0.0]), np.array([0.0, 0.0])]
-        if num_labels > 1:
-            # Track lane markers
-            # ALgorithm works by picking the 2 candidates with the least possible distance from previous cached values for left and right markers (if they are within a reasonable threshold)
-            mindistance1 = []
-            mindistance2 = []
-            for i in range(1, num_labels):
-                p = centroids[i]
-                ptdistance1 = abs(p[0] - self.prevpt1[0])
-                ptdistance2 = abs(p[0] - self.prevpt2[0])
-                mindistance1.append(ptdistance1)
-                mindistance2.append(ptdistance2)
+        # Detect lines using HoughLinesP (instead of HoughLine because of computational power)
+        # Hough lines
+        gray_lines = cv2.HoughLinesP(gray_edges, 1, np.pi / 180, threshold=50, maxLineGap=50)
+        hsv_lines = cv2.HoughLinesP(hsv_edges, 1, np.pi / 180, threshold=50, maxLineGap=50)
 
-            threshdistance1 = min(mindistance1)
-            threshdistance2 = min(mindistance2)
+        thicc = 2  # Line thiccness for drawing
 
-            minlb1 = np.argmin(mindistance1)
-            minlb2 = np.argmin(mindistance2)
 
-            cpt[0] = centroids[minlb1 + 1]
-            cpt[1] = centroids[minlb2 + 1]
+        # Old implementation: This one just gets all hough lines so there is a lot of noise
+        # # Draw lines on color image
+        # if hsv_lines is not None:
+        #     for line in hsv_lines:
+        #         x1, y1, x2, y2 = line[0]
+        #         cv2.line(color_masked, (x1, y1), (x2, y2), (0, 255, 0), thicc) 
 
-            # Use previous points if distance is too large
-            if threshdistance1 > 100:
-                cpt[0] = self.prevpt1
-            if threshdistance2 > 100:
-                cpt[1] = self.prevpt2]
-        else:
-            cpt[0] = self.prevpt1
-            cpt[1] = self.prevpt2
+        # # Optional: draw lines on grayscale image
+        # if gray_lines is not None:
+        #     for line in gray_lines:
+        #         x1, y1, x2, y2 = line[0]
+        #         cv2.line(gray_masked, (x1, y1), (x2, y2), 255, thicc)
 
-        # Update previous points
-        self.prevpt1 = cpt[0]
-        self.prevpt2 = cpt[1]
+        # New version: Filtered hough lines by gradient and pick them out by possible groups
+        # Just need to use grayscale tbh
+        left_lines = []
+        right_lines = []
 
-        # Compute midpoint
-        fpt = np.array([(cpt[0][0] + cpt[1][0]) / 2, (cpt[0][1] + cpt[1][1]) / 2 + rows // 3 * 2])
+        # Filter & group lines by slope and position
+        if gray_lines is not None:
+            for line in gray_lines:
+                x1, y1, x2, y2 = line[0]
+                if x2 - x1 == 0:
+                    continue  # skip vertical lines
+                slope = (y2 - y1) / (x2 - x1)
+                if abs(slope) < 0.5:
+                    continue  # filter out near-horizontal lines
+                if slope < 0 and x1 < frame.shape[1] // 2 and x2 < frame.shape[1] // 2:
+                    left_lines.append((x1, y1, x2, y2))
+                elif slope > 0 and x1 > frame.shape[1] // 2 and x2 > frame.shape[1] // 2:
+                    right_lines.append((x1, y1, x2, y2))
 
-        # Convert ROI to color for visualization
-        dst = cv2.cvtColor(dst, cv2.COLOR_GRAY2BGR)
+        left_fit = self.average_line(left_lines)
+        right_fit = self.average_line(right_lines)
 
-        # Draw circles for visualization
-        cv2.circle(frame, (int(fpt[0]), int(fpt[1])), 2, (0, 0, 255), 2)
-        cv2.circle(dst, (int(cpt[0][0]), int(cpt[0][1])), 2, (0, 0, 255), 2)
-        cv2.circle(dst, (int(cpt[1][0]), int(cpt[1][1])), 2, (255, 0, 0), 2)
+        height = frame.shape[0]
+        y1 = int(height * 0.6)
+        y2 = height
 
-        # Compute cross-track error
-        self.error = cols / 2 - fpt[0]
+        if left_fit is not None:
+            x1 = int(left_fit[0] * y1 + left_fit[1])
+            x2 = int(left_fit[0] * y2 + left_fit[1])
+            cv2.line(color_masked, (x1, y1), (x2, y2), (255, 0, 0), 2)
 
-        # Update PID controller
-        self.pid_controller.update_control(self.error)
+        if right_fit is not None:
+            x1 = int(right_fit[0] * y1 + right_fit[1])
+            x2 = int(right_fit[0] * y2 + right_fit[1])
+            cv2.line(color_masked, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
-        # Display images - for debugging
-        cv2.imshow('camera', frame)
-        cv2.imshow('gray', dst)
-        cv2.waitKey(1)
+        # If both lines exist, compute vanishing point and CTE for PID
+        # Vanishing point tells us the direction to chase
+        if left_fit is not None and right_fit is not None:
+            m1, b1 = left_fit
+            m2, b2 = right_fit
+            if m1 != m2:
+                vp_y = int((b2 - b1) / (m1 - m2))
+                vp_x = int(m1 * vp_y + b1)
+                cv2.circle(color_masked, (vp_x, vp_y), 5, (0, 0, 255), -1)
+                self.error = frame.shape[1] // 2 - vp_x
+                self.pid_controller.update_control(self.error)
+
+
+        # Draw avg left and right lines on color image (we calculate on gray, but color is easier to debug)
+        # Avg left is green, avg right is blue
+        if left_fit is not None:
+            x1 = int(left_fit[0] * y1 + left_fit[1])
+            x2 = int(left_fit[0] * y2 + left_fit[1])
+            cv2.line(color_masked, (x1, y1), (x2, y2), (0, 255, 0), thicc)  # Green
+
+        if right_fit is not None:
+            x1 = int(right_fit[0] * y1 + right_fit[1])
+            x2 = int(right_fit[0] * y2 + right_fit[1])
+            cv2.line(color_masked, (x1, y1), (x2, y2), (255, 0, 0), thicc)  # Blue
+        
+        # Debug window if running on local machine
+        # cv2.imshow("Gray Masked", gray_masked)
+        # cv2.imshow("Color Masked with Lines", color_masked)
+        # cv2.waitKey(1)
+
+
+        # Publish masked grayscale image with lines
+        # gray_msg = self.bridge.cv2_to_imgmsg(gray_masked, encoding='mono8')
+        # self.masked_gray_img_pub.publish(gray_msg)
+
+        # Publish masked color image with lines
+        color_msg = self.bridge.cv2_to_imgmsg(color_masked, encoding='bgr8')
+        self.masked_color_img_pub.publish(color_msg)
+
+        # self.get_logger().info("Masked image published")
+
+        # Combined image version
+        # combined = np.hstack((frame, cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR), cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)))
+        # ros_combined = self.bridge.cv2_to_imgmsg(combined, encoding='bgr8')
+        # self.masked_img_pub.publish(ros_combined)
+
 
     def update_callback(self):
         # Publish velocity commands
