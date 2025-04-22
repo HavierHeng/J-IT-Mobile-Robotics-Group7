@@ -53,9 +53,9 @@ class LaneFollowing(Node):
         self.error = 0.0
 
         # Declare PID parameters
-        self.declare_parameter('Kp', 0.0225)  # Proportional gain 
-        self.declare_parameter('Kd', 0.01)    # Derivative gain
-        self.declare_parameter('Ki', 0.0001)  # Integral gain
+        self.declare_parameter('Kp', 0.008)  # Proportional gain 
+        self.declare_parameter('Kd', -0.000)    # Derivative gain
+        self.declare_parameter('Ki', -0.000001)  # Integral gain
         self.declare_parameter('forward_speed', 1.0)  # Forward speed - In theory, we would want throttle to be 1 (highest speed 1/10 car can tahan)
 
         Kp = self.get_parameter('Kp').value
@@ -64,6 +64,10 @@ class LaneFollowing(Node):
         self.forward_speed = self.get_parameter('forward_speed').value
 
         self.pid_controller = PID(Kp, Kd, Ki)
+
+        # Cache old values
+        self.left_lane = None
+        self.right_lane = None
 
         # Create subscription to camera images
         # Use the rectified image from the Zed2 camera
@@ -90,10 +94,10 @@ class LaneFollowing(Node):
         # Create a trapezoidal mask for ROI
         mask = np.zeros((height, width), dtype=np.uint8)
         # Define trapezoid vertices
-        top_width = int(width * 0.2)  # 20% of width at top
-        bottom_width = int(width * 0.8)  # 80% of width at bottom
-        top_y = int(height * 0.4)  # Start at 40% from top
-        bottom_y = height  # Extend to bottom
+        top_width = int(width * 1)  # 20% of width at top
+        bottom_width = int(width * 1)  # 80% of width at bottom
+        top_y = int(height * 0.5)  # Start at 40% from top
+        bottom_y = int(height * 1)  # Extend to bottom
         vertices = np.array([
             [(width - top_width) // 2, top_y],
             [(width + top_width) // 2, top_y],
@@ -133,14 +137,16 @@ class LaneFollowing(Node):
         mask = self.create_roi_mask(gray_frame.shape[0], gray_frame.shape[1])
         gray_masked = cv2.bitwise_and(gray_frame, gray_frame, mask=mask)
         color_masked = cv2.bitwise_and(frame, frame, mask=mask)
-
+        # gray_masked = gray_frame
+        # color_masked = frame
 
         # Gaussian blur to smooth image
         # Blurred HSV (Colour)
-        blurred_color = cv2.GaussianBlur(color_masked, (5, 5), 0)
+        blurred_color = cv2.GaussianBlur(color_masked, (5, 5), 0)  
         hsv = cv2.cvtColor(blurred_color, cv2.COLOR_BGR2HSV)
         # Blurred Gray (Grayscale)
-        blurred_gray = cv2.GaussianBlur(gray_masked, (5, 5), 0)
+        # blurred_gray = cv2.GaussianBlur(gray_masked, (5, 5), 0)
+        blurred_gray = gray_masked
 
         # Use Canny edge detection - lower threshold, higher threshold
         # TODO: Tune and see which value works better
@@ -180,7 +186,7 @@ class LaneFollowing(Node):
                 if x2 - x1 == 0:
                     continue  # skip vertical lines
                 slope = (y2 - y1) / (x2 - x1)
-                if abs(slope) < 0.5:
+                if abs(slope) < 0.1:
                     continue  # filter out near-horizontal lines
                 if slope < 0 and x1 < frame.shape[1] // 2 and x2 < frame.shape[1] // 2:
                     left_lines.append((x1, y1, x2, y2))
@@ -195,20 +201,18 @@ class LaneFollowing(Node):
         y2 = height
 
         if left_fit is not None:
-            x1 = int(left_fit[0] * y1 + left_fit[1])
-            x2 = int(left_fit[0] * y2 + left_fit[1])
-            cv2.line(color_masked, (x1, y1), (x2, y2), (255, 0, 0), 2)
-
+            self.left_lane = left_fit  # Update cache
         if right_fit is not None:
-            x1 = int(right_fit[0] * y1 + right_fit[1])
-            x2 = int(right_fit[0] * y2 + right_fit[1])
-            cv2.line(color_masked, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            self.right_lane = right_fit  # update cache
+
+        # if left_fit is not None and right_fit is not None:
+        #     self.get_logger().info("Found left and right")
 
         # If both lines exist, compute vanishing point and CTE for PID
         # Vanishing point tells us the direction to chase
-        if left_fit is not None and right_fit is not None:
-            m1, b1 = left_fit
-            m2, b2 = right_fit
+        if self.left_lane is not None and self.right_lane is not None:
+            m1, b1 = self.left_lane
+            m2, b2 = self.right_lane
             if m1 != m2:
                 vp_y = int((b2 - b1) / (m1 - m2))
                 vp_x = int(m1 * vp_y + b1)
@@ -219,14 +223,14 @@ class LaneFollowing(Node):
 
         # Draw avg left and right lines on color image (we calculate on gray, but color is easier to debug)
         # Avg left is green, avg right is blue
-        if left_fit is not None:
-            x1 = int(left_fit[0] * y1 + left_fit[1])
-            x2 = int(left_fit[0] * y2 + left_fit[1])
+        if self.left_lane is not None:
+            x1 = int(self.left_lane[0] * y1 + self.left_lane[1])
+            x2 = int(self.left_lane[0] * y2 + self.left_lane[1])
             cv2.line(color_masked, (x1, y1), (x2, y2), (0, 255, 0), thicc)  # Green
 
-        if right_fit is not None:
-            x1 = int(right_fit[0] * y1 + right_fit[1])
-            x2 = int(right_fit[0] * y2 + right_fit[1])
+        if self.right_lane is not None:
+            x1 = int(self.right_lane [0] * y1 + self.right_lane [1])
+            x2 = int(self.right_lane [0] * y2 + self.right_lane [1])
             cv2.line(color_masked, (x1, y1), (x2, y2), (255, 0, 0), thicc)  # Blue
         
         # Debug window if running on local machine
