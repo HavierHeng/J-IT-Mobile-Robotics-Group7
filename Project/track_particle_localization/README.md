@@ -8,6 +8,26 @@ To solve these however, we need two things:
 1) Where is the robot position in the world frame? This is the reason why we cannot just trust the `ObjectsStamped` position returned by Zed2, its because its Odometry is messed up. Meanwhile, if we use a particle filter to re-estimate our position, then it would go beyond just trusting the virtual odometry, but instead counter checking the odometry against the known map.
 2) Where is the Object of classification X in the camera frame? The reason why we turn it back to the camera frame is so we can do a transformation to be relative to the world frame based on the robot position estimate using (1). Internally, zed2 transforms the objects it detects to world frame -> But this uses the shitty estimate of Odometry.
 
+## Are you being redundant to do MCL when Zed2 already gives you a position using Visual Inertia Odometry?
+
+VIO (like the ZED2's output) gives you relative pose estimates, usually with high short-term precision but long-term drift due to:
+- Sensor noise
+- Lack of loop closure (Zed2 odom topic does have it but its not very consistent)
+- No absolute reference to the map
+
+This is good enough for local motion (e.g finding out how far you moved from odom/start frame). Accumulates error however.
+
+Hence the position given by Zed2 comes with some uncertainty (`PosewithCovariance`). I can turn these uncertainty into a set of particles to test hypothesis on positions of where the bot can be in the global context based on what they see, therefore fixing up any uncertainties from local odometry.
+
+Other problems these tackle:
+1) Global localization: If your robot gets "lost", MCL can recover from bad initial guesses.
+2) Map correction: By comparing sensor data (e.g., depth or pointcloud from ZED2) with a known map, MCL can correct for drift.
+3) Probabilistic tracking: It maintains multiple hypotheses of position and can weigh them against real-world observations.
+
+MCL/particle filter gives global accuracy of position in world, as compared to VIO/odometry local consistency.
+
+This is painfully slow and has high overhead however so its only computed like 1Hz to confirm the position of the car (Odom is computed via EKF constantly).
+
 ## Sub-Problems
 ### Sub-Problem 1: Localization of robot in a known map
 The first sub problem is localization in a known map, by finding the robot's position in the world space based on a known map.
@@ -73,8 +93,20 @@ To prevent this, one method our team has thought about to use is a threshold min
 
 This is as objects that are too close could just be due to some temporary images, while objects that are too far are too uncertain in position to be a good consideration for localization.
 
+We also abuse some region of interest, we can mask out background areas using opencv (same as what was done in track following).
+
 #### Sub Sub Problem: Visual Inertial Odometry woes
 We know how bad Visual Inertial Odometry based on the Zed2 camera can be. But this isn't a problem. This is as our particle filter does consider the uncertainty of a position of the car to apply the necessary translations and rotations to move each particle. Eventually, any new observations will cause a resampling, killing the bad hypotheis.
+
+#### Sub Sub Problem: /cmd_vel throttle might not be equal to how many m/s in real world, visual odometry as ground truth
+
+While using /cmd_vel works in simulations to update the dynamics model's linear x velocity, this is not the case in a real robot. Putting our throttle to the max value of 1.0 might not correspond 1:1 to the 1.0m/s in physical world assumption. 
+
+Also because when we are testing the robot without battery, our robot is not even self-propelled since we don't actually move the robot via throttle but via carrying it around to simulate movement. 
+
+We need to use a method to calculate the velocity of the robot. This can be done via taking the Zed2's IMU via the topic `/zed/zed_node/imu/data` for `IMU` messages containing the linear acceleration and angular velocity.
+
+IMU 
 
 ### Sub-Problem 2: Custom YOLO Publisher for Position of objects in world with 
 The second sub problem is about the YOLO model used for image classification. 
@@ -87,16 +119,7 @@ The output of this problem is preferably a position of the object in the camera 
 
 Results from our testing show that the `Medium` model does relatively well at detecting humans and cars without having too high load on the Nvidia Jetson.
 
-#### Sub Sub Problem: /cmd_vel throttle might not be equal to how many m/s in real world, IMU as ground truth
-
-While using /cmd_vel works in simulations to update the dynamics model's linear x velocity, this is not the case in a real robot. Putting our throttle to the max value of 1.0 might not correspond 1:1 to the 1.0m/s in physical world assumption. 
-
-Also because when we are testing the robot without battery, our robot is not even self-propelled since we don't actually move the robot via throttle but via carrying it around to simulate movement. 
-
-We need to use a method to calculate the velocity of the robot. This can be done via taking the Zed2's IMU via the topic `/zed/zed_node/imu/data` for `IMU` messages containing the linear acceleration and angular velocity.
-
 ## Assumptions
-
 ### Gaussian Distribution
 Assume Gaussian distribution - this makes it easy to track the uncertainty of a guess of a position of an object which we can use to determine how trustworthy a position recording of an object in world space is:
 1) Dynamics model (linear and angular velocity) due to Odometry drifts - and also given by `PosewithCovariance` object from Zed2 Visual Inertial Odometry 
@@ -121,7 +144,7 @@ A' in this case is lower in variance, so it takes precedence in the CSV, we over
 ### Starting position of car fixed in world frame based on the known map
 The car always starts at a fixed position in the map at the start of the race track, and has a fixed goal. The world frame is known and fixed against the known map recorded (rather than the Odom position of the robot).
 
-### Dynamics model: Unicycle Model
+### Dynamics model
 The car is best represented by a non-holonomic model.
 
 By right since the car has a turning radius, it should be an Ackermann model. However, it might be a bit messy to get the update equations for the robot and particles. It is also hard to measure the turn radius of this car due to the inconsistency of the pull strength of the servo, so its turn radius is never really the same.
@@ -140,6 +163,8 @@ $$
 
 > Problem: Throttle being 1.0 (max value) might not actually be 1.0m/s in practice. This means to update the particles with the dynamics might not be as accurate as we expect... Either we record the speed at 1.0m/s as a constant. Or we use some IMU as a fallback. 
 
+Here is the thing. The problem with the throttle not being 1.0m/s and stuff is not a big deal. Zed2 already IMU Fusion its Visual feed with Inertia and publishes it onto `/zed/zed_node/pose` as a `PosewithCovariance`. This should be accurate enough in the local scale. Hence to any particles in our system, as our car moves, we can simply store a previous_pose state, and then compare against the current pose state, and take the Translation and Rotation quaternion from timestep (t-1) to timestep t. Then apply these affine transforms to each particle (considering their gaussian noise e.g using `np.random.normal` to sample some fixed noisy movement based on the returned covariance from zed2). We do not explicity ever need to know what model our car represents, just observe and apply.
+
 ### Measurement model: Position of points in pointcloud
 Rather than use the objects detected as landmarks (we opt for this in our report), the fact that we have a point cloud map means that we can figure out what points are seen in a pointcloud. This can then be used to update our particle's possibly of hypothesis.
 
@@ -153,8 +178,24 @@ Now, we can run our test script, set the initial position of the robot in the wo
 
 ## ROS2 Topics for Zed2 camera
 `/zed/zed_node/pose` - `Pose` Camera pose referred to Map frame (complete data fusion applied) - Can be used to get current position in space
+`/zed/zed_node/odom`: Odometry pose referred to odometry frame (only visual odometry is applied for ZED, visual-inertial for ZED Mini)
 `/cmd_vel` - `Twist` - To control the robot - max throttle is 1.0 (but it doesn't mean its 1.0m/s)
-`
+`/zed/zed_node/point_cloud/cloud_registered` - Get `PointCloud2` from Robot camera from Zed2 - recommended not to open RViz2 due to heavy processing on Jetson devices. This `PointCloud2` messages contain the Points that are being seen right now live from the camera. Ridiculously high fidelity with very dense PointCloud compared to Rtabmap.
+`/rtabmap/cloud_map` - Get `PointCloud2` from Robot from RTabMap, loading from the recorded map database. This is published by Rtabmap when it runs (you can run it without `rtabviz` just for the publisher), and act as the point cloud representing the known map/pre-recorded pointcloud map. 
+
+
+```python
+# To read a pointcloud2 message 
+from sensor_msgs.msg import PointCloud2
+from sensor_msgs import point_cloud2
+
+def callback_pointcloud(data):
+    assert isinstance(data, PointCloud2)
+    gen = point_cloud2.read_points(data)
+    print type(gen)
+    for p in gen:
+      print p  # type depends on your data type, first three entries are probably x,y,z
+```
 
 
 ## Bonus Problem: Making SLAM
