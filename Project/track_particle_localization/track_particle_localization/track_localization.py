@@ -639,11 +639,14 @@ class AMCLPointCloud(Node):
         super().destroy_node()
 
 def main(args=None):
+    # Find out by opening RTabMapViz
     xmin = -10.0
     xmax = 10.0
     ymin = -10.0
     ymax = 10.0
-    num_particles = 2000
+
+    # I swear the Jetson will explode if you set this to 2000
+    num_particles = 100
     rclpy.init(args=args)
     node = AMCLPointCloud(num_particles, xmin, xmax, ymin, ymax)
     try:
