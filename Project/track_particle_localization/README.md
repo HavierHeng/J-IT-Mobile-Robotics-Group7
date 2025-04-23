@@ -104,9 +104,14 @@ While using /cmd_vel works in simulations to update the dynamics model's linear 
 
 Also because when we are testing the robot without battery, our robot is not even self-propelled since we don't actually move the robot via throttle but via carrying it around to simulate movement. 
 
-We need to use a method to calculate the velocity of the robot. This can be done via taking the Zed2's IMU via the topic `/zed/zed_node/imu/data` for `IMU` messages containing the linear acceleration and angular velocity.
+We need to use a method to calculate the velocity of the robot. This can be done via taking the Zed2's IMU via the topic `/zed/zed_node/imu/data` for `IMU` messages containing the linear acceleration and angular velocity. But this is inaccurate. Use the Pose from `zed/zed_node/pose`.
 
-IMU 
+#### What to use OGM from RTabmap for:
+Either use OGM to:
+- Ignore points where occupancy grid states is occupied is placed and don't put it into KD Tree. There is no reason to check Points at an (x,y) position that is occupied.
+- For initializing valid particle positions (and checking is particles are just wrong position) - if a particle spawns in an occupied grid - resample it. If particle moves into an occupied grid - penalize its weight/set possibility to very low/zero
+- Simplify calculations (instead of matching all points in the pointcloud of Rtabmap) - During localization, project the robot’s point cloud onto the 2D plane and compare it to the occupancy grid instead of directly matching 3D points. 
+    - This abstracts away small positional shifts in obstacles (e.g a cone being moved just slightly forwards), as the grid represents the environment at a coarser level instead of point by point.
 
 ### Sub-Problem 2: Custom YOLO Publisher for Position of objects in world with 
 The second sub problem is about the YOLO model used for image classification. 
