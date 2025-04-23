@@ -20,8 +20,8 @@ class ObjectTrackerRTabMap(Node):
 
         # Declare parameters
         self.declare_parameter('min_distance', 0.5)  # Min distance for object detection (m)
-        self.declare_parameter('max_distance', 10.0)  # Max distance for object detection (m)
-        self.declare_parameter('cluster_distance', 1.0)  # Distance threshold for clustering objects (m)
+        self.declare_parameter('max_distance', 5.0)  # Max distance for object detection (m)
+        self.declare_parameter('cluster_distance', 2.0)  # Distance threshold for clustering objects (m)
 
         self.min_distance = self.get_parameter('min_distance').value
         self.max_distance = self.get_parameter('max_distance').value
@@ -89,6 +89,7 @@ class ObjectTrackerRTabMap(Node):
             self.robot_pose = msg.pose.pose
             self.robot_cov = cov
             self.pose_received = True
+            # self.get_logger().info("Pose updated successfully!!")
 
             # Update transformation matrices
             q = np.array([
@@ -138,8 +139,8 @@ class ObjectTrackerRTabMap(Node):
             # Process each object
             new_objects = []
             for obj in msg.objects:
-                if obj.label not in ['person', 'vehicle']:
-                    continue
+                # if obj.label not in ['person', 'vehicle']:
+                #     continue
 
                 # Object position in world (odom) frame
                 pos_odom = np.array([
@@ -185,6 +186,8 @@ class ObjectTrackerRTabMap(Node):
 
             # Cluster objects to assign IDs
             if new_objects:
+                stuff = [obj["class"] for obj in new_objects]
+                self.get_logger().info(f"New objects: {stuff}")
                 self.cluster_and_update_objects(new_objects)
 
             # Publish distance to nearest object (for debugging)
@@ -283,6 +286,8 @@ class ObjectTrackerRTabMap(Node):
     def shutdown(self):
         """Save objects and cleanup."""
         self.save_objects_to_csv()
+        self.get_logger().info("Finished writing the csv")
+        # self.get_logger().info(f"number objects found")
         self.destroy_node()
 
 def main(args=None):
