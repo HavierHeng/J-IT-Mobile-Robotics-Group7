@@ -10,8 +10,7 @@ from sensor_msgs.msg import PointCloud2, CameraInfo
 from visualization_msgs.msg import Marker, MarkerArray
 from nav_msgs.msg import OccupancyGrid
 from zed_interfaces.msg import Object, ObjectsStamped
-import sensor_msgs.point_cloud2 as point_cloud2
-from math import sqrt, cos, sin, pi, atan2
+import sensor_msgs.point_cloud2 as point_cloud2 from math import sqrt, cos, sin, pi, atan2
 from threading import Thread, Lock
 import numpy as np
 from scipy.spatial import KDTree
@@ -52,13 +51,18 @@ class ParticleFilter:
                     filtered_points.append(p)
             self.map_points = np.array(filtered_points) if filtered_points else map_points
         self.map_kdtree = KDTree(self.map_points)
+
+        # From bounds of RTabmap db
         self.xmin = xmin
         self.xmax = xmax
         self.ymin = ymin
         self.ymax = ymax
+
+        # Configure dynamics uncertainties
         self.dynamics_translation_noise_std_dev = dynamics_translation_noise_std_dev
         self.dynamics_orientation_noise_std_dev = dynamics_orientation_noise_std_dev
         self.point_cloud_measurement_noise_std_dev = point_cloud_measurement_noise_std_dev
+
         self.eval_points = 100
         self.last_robot_odom = None
         self.robot_odom = None
@@ -401,6 +405,8 @@ class ParticleFilter:
         mean_pose = np.average(poses, axis=0, weights=weights)
         diff = poses - mean_pose
         cov = np.cov(diff.T, aweights=weights, ddof=1)
+
+        # Craft message to be sent for debugging/visualization in RViz
         pose_msg = PoseWithCovarianceStamped()
         pose_msg.header.stamp = self.node.get_clock().now().to_msg()
         pose_msg.header.frame_id = 'map'
@@ -413,6 +419,11 @@ class ParticleFilter:
         pose_msg.pose.pose.orientation.z = q[2]
         pose_msg.pose.pose.orientation.w = q[3]
         pose_msg.pose.covariance = np.zeros(36)
+
+        # Covariance matrix in 6x6 is assumed to have indepedence between states (x, y, z, theta)
+        # This way we only need to set the variance
+        # The pose covariance is calculated from particles covariance 
+        # since its calculated via the mean and variance of particles that guestimate where robot is
         pose_msg.pose.covariance[0] = cov[0, 0]  # x-x
         pose_msg.pose.covariance[1] = cov[0, 1]  # x-y
         pose_msg.pose.covariance[5] = cov[1, 1]  # y-y
@@ -446,15 +457,22 @@ class AMCLPointCloud(Node):
         self.declare_parameter('min_depth', 0.1)
         self.declare_parameter('max_depth', 20.0)
         map_file = self.get_parameter('map_file').value
+
+        # params that cannot be obtained from any topics or file - its just based on some prior knowledge
+        # These will be used to propragate std dev for variance calculations later... so we preset them as some constant
         dynamics_translation_noise_std_dev = self.get_parameter('dynamics_translation_noise_std_dev').value
         dynamics_orientation_noise_std_dev = self.get_parameter('dynamics_orientation_noise_std_dev').value
         point_cloud_measurement_noise_std_dev = self.get_parameter('point_cloud_measurement_noise_std_dev').value
+
+        # Load in the point cloud
         with open(map_file, 'rb') as f:
             map_point_cloud = pickle.load(f)
         map_points = []
         for p in point_cloud2.read_points(map_point_cloud, field_names=("x", "y", "z")):
             map_points.append([p[0], p[1], p[2]])
         map_points = np.array(map_points)
+
+
         self.ogm = None
         self.pf = ParticleFilter(
             num_particles, map_points, self.ogm, xmin, xmax, ymin, ymax,
