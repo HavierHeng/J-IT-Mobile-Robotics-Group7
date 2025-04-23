@@ -136,7 +136,7 @@ class ParticleFilter:
         # Pre-filter points using KDTree
         query_point = np.array([x, y, 0])
         radius = self.max_depth + 1.0  # Margin for robustness
-        indices = self.map_kdtree.query_ball_point(query_point, radius)
+        indices = self.map_kdtree.query_ball_point(query_point, radius, p=2)
         nearby_points = self.map_points[indices]
         if not nearby_points.any():
             return np.array([])
@@ -366,6 +366,18 @@ class ParticleFilter:
                     'position': pos_world_corrected.tolist(),
                     'variance': variance
                 }
+
+    def predict_particle_odometry(self, particle, dt):
+        """Update particle pose."""
+        if abs(self.dx) < 1e-10 and abs(self.dy) < 1e-10 and abs(self.dyaw) < 1e-5:
+            return
+        v = sqrt(self.dx**2 + self.dy**2)
+        nx = np.random.normal(0, self.dynamics_translation_noise_std_dev)
+        ny = np.random.normal(0, self.dynamics_translation_noise_std_dev)
+        ntheta = np.random.normal(0, self.dynamics_orientation_noise_std_dev)
+        particle.x += v * cos(particle.theta) * dt + nx
+        particle.y += v * sin(particle.theta) * dt + ny
+        particle.theta += self.dyaw * dt + ntheta
 
     def save_objects_to_csv(self, filename='objects.csv'):
         """Serialize object dictionary to CSV."""
