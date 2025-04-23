@@ -20,7 +20,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'track_localization'= track_particle_localization.track_localization:main',
+            'track_localization = track_particle_localization.track_localization:main',
+            'get_map_size = track_particle_localization.rtabmap_size:main'
         ],
     },
 )

@@ -2,7 +2,7 @@
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 import tf_transformations as tr
 from std_msgs.msg import Header, ColorRGBA
 from geometry_msgs.msg import PoseWithCovarianceStamped, Point, Twist
@@ -10,7 +10,8 @@ from sensor_msgs.msg import PointCloud2, CameraInfo
 from visualization_msgs.msg import Marker, MarkerArray
 from nav_msgs.msg import OccupancyGrid
 from zed_interfaces.msg import Object, ObjectsStamped
-import sensor_msgs.point_cloud2 as point_cloud2 from math import sqrt, cos, sin, pi, atan2
+import sensor_msgs_py.point_cloud2 as point_cloud2  
+from math import sqrt, cos, sin, pi, atan2
 from threading import Thread, Lock
 import numpy as np
 from scipy.spatial import KDTree
@@ -72,11 +73,13 @@ class ParticleFilter:
         self.particles = []
         self.weights = []
         self.node = node
-        # Camera parameters
+        # Camera parameters defaults (these are estimates)
         self.fx = 700.0
         self.fy = 700.0
         self.cx = 672.0
         self.cy = 376.0
+
+
         self.img_width = 1280
         self.img_height = 720
         self.min_depth = node.get_parameter('min_depth').value
@@ -429,7 +432,7 @@ class ParticleFilter:
         pose_msg.pose.covariance[5] = cov[1, 1]  # y-y
         pose_msg.pose.covariance[6] = cov[1, 0]  # y-x
         pose_msg.pose.covariance[35] = cov[2, 2]  # theta-theta
-        return pose_msg.pose, cov
+        return pose_msg, cov
 
     @staticmethod
     def metric_to_grid_coords(x, y, ogm):
@@ -446,9 +449,11 @@ class ParticleFilter:
         return row, col
 
 class AMCLPointCloud(Node):
-    def __init__(self, num_particles, xmin, xmax, ymin, ymax):
+    def __init__(self, num_particles, map_points, xmin, xmax, ymin, ymax):
+        # Technically you could solve part 2 with just RTabmap localization...
+        # But this is way more funny to modify HW4
+
         super().__init__('amcl_point_cloud')
-        self.declare_parameter('map_file', '')
         self.declare_parameter('dynamics_translation_noise_std_dev', 0.1)
         self.declare_parameter('dynamics_orientation_noise_std_dev', 0.05)
         self.declare_parameter('point_cloud_measurement_noise_std_dev', 0.1)
@@ -456,7 +461,6 @@ class AMCLPointCloud(Node):
         self.declare_parameter('max_distance', 10.0)
         self.declare_parameter('min_depth', 0.1)
         self.declare_parameter('max_depth', 20.0)
-        map_file = self.get_parameter('map_file').value
 
         # params that cannot be obtained from any topics or file - its just based on some prior knowledge
         # These will be used to propragate std dev for variance calculations later... so we preset them as some constant
@@ -464,14 +468,12 @@ class AMCLPointCloud(Node):
         dynamics_orientation_noise_std_dev = self.get_parameter('dynamics_orientation_noise_std_dev').value
         point_cloud_measurement_noise_std_dev = self.get_parameter('point_cloud_measurement_noise_std_dev').value
 
-        # Load in the point cloud
-        with open(map_file, 'rb') as f:
-            map_point_cloud = pickle.load(f)
-        map_points = []
-        for p in point_cloud2.read_points(map_point_cloud, field_names=("x", "y", "z")):
-            map_points.append([p[0], p[1], p[2]])
-        map_points = np.array(map_points)
-
+        # # Subscribe to the point cloud for the list of point clouds in map
+        # self.subscription = self.create_subscription(
+        #     PointCloud2,
+        #     '/rtabmap/cloud_map',
+        #     self.listener_callback,
+        #     10)
 
         self.ogm = None
         self.pf = ParticleFilter(
@@ -485,8 +487,6 @@ class AMCLPointCloud(Node):
         self.mutex = Lock()
         self.camera_info_received = False
         self.particles_pub = self.create_publisher(MarkerArray, 'particle_filter/particles', 1)
-        self.debug_point_cloud_pub = self.create_publisher(PointCloud2, 'debug/point_cloud', 1)
-        self.objects_point_cloud_pub = self.create_publisher(PointCloud2, 'objects_point_cloud', 1)
         self.amcl_pose_pub = self.create_publisher(PoseWithCovarianceStamped, 'amcl_pose', 1)
         self.odom_sub = self.create_subscription(
             PoseWithCovarianceStamped, '/zed/zed_node/pose', self.odometry_callback,
@@ -512,6 +512,12 @@ class AMCLPointCloud(Node):
         # Timer to check for missing camera info
         self.camera_info_timeout = self.create_timer(5.0, self.check_camera_info)
 
+    def listener_callback(self, msg):
+        points = []
+        for p in point_cloud2.read_points(msg, field_names=("x", "y", "z"), skip_nans=True):
+            points.append([p[0], p[1], p[2]])
+
+
     def check_camera_info(self):
         """Log error if camera info is missing."""
         if not self.camera_info_received:
@@ -529,9 +535,10 @@ class AMCLPointCloud(Node):
         self.pf.cy = msg.k[5]  # principal_point_y
         self.pf.img_width = msg.width
         self.pf.img_height = msg.height
+        if not self.camera_info_received:
+            self.get_logger().info(f"CameraInfo received and parameters updated: {self.pf.fx} {self.pf.fy} {self.pf.cx} {self.pf.cy}")
         self.camera_info_received = True
-        self.get_logger().info("CameraInfo received and parameters updated.")
-
+        
     def ogm_callback(self, msg):
         """Set static OGM (loaded once)."""
         if self.pf.ogm is None:
@@ -559,7 +566,6 @@ class AMCLPointCloud(Node):
             dt = (msg.header.stamp.sec - self.last_point_cloud.header.stamp.sec) + \
                  (msg.header.stamp.nanosec - self.last_point_cloud.header.stamp.nanosec) / 1e9
         self.mutex.acquire()
-        self.publish_debug_point_cloud(msg)
         self.pf.handle_observation(msg, dt)
         self.pf.dx = 0
         self.pf.dy = 0
@@ -570,30 +576,7 @@ class AMCLPointCloud(Node):
     def objects_callback(self, msg):
         self.mutex.acquire()
         self.pf.handle_objects(msg)
-        self.publish_objects_point_cloud()
         self.mutex.release()
-
-    def publish_debug_point_cloud(self, msg):
-        points, _ = self.pf.subsample_point_cloud(msg)
-        header = Header(stamp=self.get_clock().now().to_msg(), frame_id='zed2_camera')
-        fields = [
-            {'name': 'x', 'offset': 0, 'datatype': 7, 'count': 1},
-            {'name': 'y', 'offset': 4, 'datatype': 7, 'count': 1},
-            {'name': 'z', 'offset': 8, 'datatype': 7, 'count': 1}
-        ]
-        cloud_msg = point_cloud2.create_cloud(header, fields, points)
-        self.debug_point_cloud_pub.publish(cloud_msg)
-
-    def publish_objects_point_cloud(self):
-        points = [data['position'] for data in self.pf.object_dict.values()]
-        header = Header(stamp=self.get_clock().now().to_msg(), frame_id='map')
-        fields = [
-            {'name': 'x', 'offset': 0, 'datatype': 7, 'count': 1},
-            {'name': 'y', 'offset': 4, 'datatype': 7, 'count': 1},
-            {'name': 'z', 'offset': 8, 'datatype': 7, 'count': 1}
-        ]
-        cloud_msg = point_cloud2.create_cloud(header, fields, points)
-        self.objects_point_cloud_pub.publish(cloud_msg)
 
     def publish_particle_markers(self):
         marker_array = MarkerArray()
@@ -638,17 +621,84 @@ class AMCLPointCloud(Node):
         self.pf.save_objects_to_csv()
         super().destroy_node()
 
+
+class PointCloudProcessor(Node):
+    def __init__(self, topic='/rtabmap/cloud_map'):
+        super().__init__('pointcloud_processor')
+        self.qos = QoSProfile(
+            depth=10,
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            durability=DurabilityPolicy.VOLATILE
+        )
+        self.topic = topic
+        self.sub = self.create_subscription(
+                PointCloud2,
+                self.topic,
+                lambda msg: self.callback(msg),
+                self.qos)
+
+    def wait_for_pointcloud(self, timeout_sec = 5.0):
+        """Wait for a single PointCloud2 message from a topic and convert it to a NumPy array."""
+        map_points = None
+
+        # Store message in a list to capture it from the callback
+        self.msg_container = []
+        
+        # Spin until a message is received or timeout occurs
+        start_time = self.get_clock().now()
+        while not self.msg_container and (self.get_clock().now() - start_time).nanoseconds / 1e9 < timeout_sec:
+            rclpy.spin_once(self, timeout_sec=0.1)
+        
+        # Process the message if received
+        if self.msg_container:
+            map_points = self.pointcloud2_to_numpy(self.msg_container[0])
+            self.get_logger().info(f"Received pointcloud with {map_points.shape[0]} points from {self.topic}")
+        else:
+            self.get_logger().warn(f"No message received on topic {self.topic} within {timeout_sec} seconds")
+            
+            
+        return map_points
+
+
+    def callback(self, msg: PointCloud2):
+        """Callback to store the received message."""
+        self.msg_container.append(msg)
+
+    def pointcloud2_to_numpy(self, cloud_msg: PointCloud2):
+        """Convert a PointCloud2 message to a NumPy array of (x, y, z) points."""
+        map_points = []
+        for p in point_cloud2.read_points(cloud_msg, field_names=("x", "y", "z"), skip_nans=True):
+            map_points.append([p[0], p[1], p[2]])
+        return np.array(map_points)
+
+
 def main(args=None):
-    # Find out by opening RTabMapViz
-    xmin = -10.0
-    xmax = 10.0
-    ymin = -10.0
-    ymax = 10.0
+    # Find out by opening RTabMapViz or our custom rtabmap_size.py
+    xmin = 0.3722414970397949
+    xmax = 5.594254493713379
+    ymin = -4.249655723571777
+    ymax = 3.076587438583374
 
     # I swear the Jetson will explode if you set this to 2000
     num_particles = 100
     rclpy.init(args=args)
-    node = AMCLPointCloud(num_particles, xmin, xmax, ymin, ymax)
+
+    # ROS2 is tarded - no way to wait for one message other than making a whole ass class
+    stupid_node = PointCloudProcessor()
+    map_points = stupid_node.wait_for_pointcloud(timeout_sec=10.0)
+    if map_points is not None:
+        # Process the NumPy array of points
+        stupid_node.get_logger().info(f"Map points shape: {map_points.shape}")
+        # Example: Print first few points
+        print("First 5 points (x, y, z):")
+        print(map_points[:5])
+        # Use map_points with RTAB-Map or other processing
+    else:
+        stupid_node.get_logger().error("Failed to obtain map points")
+    stupid_node.destroy_node()  # What is my purpose? You pass PointCloud2. Oh my god.
+
+    node = AMCLPointCloud(num_particles, map_points, xmin, xmax, ymin, ymax)
     try:
         rclpy.spin(node)
     finally:
