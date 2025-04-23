@@ -21,7 +21,6 @@ setup(
     entry_points={
         'console_scripts': [
             'track_follower = track_follower_challenge.track_follower:main',
-            'track_follower_cv = track_follower_challenge.track_follower_cv:main',
             'aruco_relay = track_follower_challenge.aruco_relay:main',
         ],
     },

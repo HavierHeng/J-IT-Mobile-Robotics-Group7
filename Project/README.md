@@ -1,24 +1,33 @@
-# For the Lane Following Bot
+# Race Track Challengo
 
-The control system is always a PID controller - the PID parameters will be the same regardless of which implementation is chosen.
+## To run
 
-## Method 1: Uses the dumb dumb OpenCV Blob tracking way
+1. Make new package: `ros2 pkg create --build-type ament_python object_follower_hw`
 
-This one can be built directly as long as OpenCV and CV bridge (for ROS2 Image messages to OpenCV images conversion) is available on the 1/10th car.
+2. Put python file with the Node implementation into new package
 
-This has low resource overhead though.
+3. Colcon build the new package: `colon build --symlink-install --packages-select object_follower_hw`
+    - Recommendation: Avoid building all packages, as it may include extra things already built - Zed2 takes quite long to do so.
 
-Downside is that its pixel based - the car doesn't really know exactly how far out it is from the left and right lane. 
+4. Source the workspace overlay: `source ~/ros_ws/install/local_setup.bash`
 
-Another downside is that it fail in scenarios where there are multiple candidates for connected components/blobs in the image . Our team does take some precautions by caching the position of centroids of left and right detected blobs and keeping a threshold on the max distance away from old values a blob can be. But this may still cause it to lock onto the wrong blobs.
+5. Start remote control of RC Car
+    - open terminal: `remote_control`
+    - press reset button of arduino zero board
+    - Option 1:
+        - open new terminal:`ros2 run joy joy_node`
+        - open new terminal type: `ros2 run car_control car_control`
 
-## Method 2: LaneNet DL
+    - Option 2:
+        - Run this command in terminal: `ros2 launch car_control car_control.launch.py`
+  
+6. For bounding box visualizer just use the one given in the practical and start rviz. Change the `common.yaml` file in the Zed2 package to use the bag classification model. In new terminals for each command:
+    - Start the Zed2 camera: `ros2 launch zed_wrapper zed_camera.launch.py camera_model:=zed2`
+    - Start the given visualizer for bounding boxes: `ros2 run obj_det_visualizer obj_visualizer`
+    - Start RViz2, you should see a camera view and world view with marker representing the 3D bounding box from Zed2 object detection: `rviz2`
 
-The nice thing is that someone has wrapped LaneNet Model into a ROS package: https://github.com/AbangLZU/LaneNetRos
-The bad thing is that its not directly usable - the publisher ROS node that its written in is the older ROS 1 API using `rospy`. 
+7. Start the node to control the car: `ros2 run object_follower_hw straight_follower`
+    - Make sure the car is in autonomous mode by pressing the joycon
 
-To have it work with `rclpy` in ROS2, we can basically hijack the internal libraries in the repo, and rewrite the code for the node to directly call the internal tensorflow code.
 
-This uses Deep Neural Network based around image segmentation to guess the lanes. It is a lot smarter than just purely counting pixels and taking their centers.
 
-After installing the LaneNetRos based on their instructions and downloading the pretrained weights, a ROS Python Node has been written that imports the LaneNetROS package and uses it to pick up lanes.
