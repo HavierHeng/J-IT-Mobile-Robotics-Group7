@@ -21,6 +21,7 @@ from geometry_msgs.msg import Twist
 from cv_bridge import CvBridge
 import cv2
 import numpy as np
+from datetime import datetime
 
 class PID:
     def __init__(self, Kp, Kd, Ki, dt=0.01):
@@ -31,6 +32,8 @@ class PID:
         self.prev_error = 0.0
         self.integral = 0.0
         self.correction = 0.0
+        self.last_update = datetime.now()
+        self.last_control = datetime.now()
 
     def update_control(self, current_error):
         # Calculate PID components
@@ -38,8 +41,10 @@ class PID:
         derivative = (current_error - self.prev_error) / self.dt
         self.correction = self.Kp * current_error + self.Kd * derivative + self.Ki * self.integral
         self.prev_error = current_error
+        self.last_update = datetime.now()
 
     def get_control(self):
+        self.last_control = datetime.now()
         return self.correction
 
 class LaneFollowing(Node):
@@ -53,9 +58,9 @@ class LaneFollowing(Node):
         self.error = 0.0
 
         # Declare PID parameters
-        self.declare_parameter('Kp', 0.008)  # Proportional gain 
-        self.declare_parameter('Kd', -0.000)    # Derivative gain
-        self.declare_parameter('Ki', -0.000001)  # Integral gain
+        self.declare_parameter('Kp', 0.06)  # Proportional gain 
+        self.declare_parameter('Kd', 0.03)    # Derivative gain
+        self.declare_parameter('Ki', 0.0001)  # Integral gain
         self.declare_parameter('forward_speed', 1.0)  # Forward speed - In theory, we would want throttle to be 1 (highest speed 1/10 car can tahan)
 
         Kp = self.get_parameter('Kp').value
@@ -69,6 +74,9 @@ class LaneFollowing(Node):
         self.left_lane = None
         self.right_lane = None
 
+        # Threshold for when to update error
+        self.max_error_change = 20  # How much max pixel jump between updates
+
         # Create subscription to camera images
         # Use the rectified image from the Zed2 camera
         self.img_sub = self.create_subscription(
@@ -79,7 +87,7 @@ class LaneFollowing(Node):
         )
 
         # Create publisher for velocity commands
-        self.cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
+        self.cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 1)
 
         # Create publisher for high contrast + ROI image + Hough lines
         self.masked_gray_img_pub = self.create_publisher(Image, 'debug/gray/masked_image', 5)
@@ -91,21 +99,30 @@ class LaneFollowing(Node):
         self.update_timer = self.create_timer(0.01, self.update_callback)
 
     def create_roi_mask(self, height, width):
-        # Create a trapezoidal mask for ROI
+        # Create a trapezoidal mask + rectangle for ROI
+        # This funny shape means that at the bottom the car can see most things (since we're certain that has a lot of lane)
+        # the top trapezoid prevents false positive from items at vanishing points
         mask = np.zeros((height, width), dtype=np.uint8)
-        # Define trapezoid vertices
-        top_width = int(width * 1)  # 20% of width at top
-        bottom_width = int(width * 1)  # 80% of width at bottom
-        top_y = int(height * 0.5)  # Start at 40% from top
-        bottom_y = int(height * 1)  # Extend to bottom
-        vertices = np.array([
+
+        #  RECTANGLE BOTTOM (e.g. bottom 20% of image)
+        rect_top_y = int(height * 0.7)
+        cv2.rectangle(mask, (0, rect_top_y), (width, height), 255, -1)
+
+        #  TRAPEZOID ABOVE RECTANGLE
+        top_width = int(width * 0.2)   # Narrow top
+        bottom_width = width           # Full width at the base of trapezoid
+        top_y = int(height * 0.57)      # Start trapezoid higher
+        bottom_y = rect_top_y          # Connect to top of rectangle
+
+        trapezoid = np.array([
             [(width - top_width) // 2, top_y],
             [(width + top_width) // 2, top_y],
             [(width + bottom_width) // 2, bottom_y],
             [(width - bottom_width) // 2, bottom_y]
         ], dtype=np.int32)
-        # Fill the trapezoid with white (255)
-        cv2.fillPoly(mask, [vertices], 255)
+
+        cv2.fillPoly(mask, [trapezoid], 255)
+
         return mask
 
     def average_line(self, lines):
@@ -122,44 +139,59 @@ class LaneFollowing(Node):
         return np.polyfit(y_coords, x_coords, 1)  # returns [slope, intercept]
 
     def image_callback(self, msg):
-        """
-        TODO:
-        - Fix the ROI cropping
-        - Tune it somehow (maybe using inRange, or some othe filter) for the actual race track
-        - Find the center of the track
-        - Actually make it move with the PIDs
-        """
         # Convert ROS Image message to OpenCV format
         frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         gray_frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='mono8')
 
+        # Test: Resize frame to drop latency
+        # frame = cv2.resize(frame, (320, 240))
+        # gray_frame = cv2.resize(gray_frame, (320, 240))
+
         # Create and apply ROI mask
         mask = self.create_roi_mask(gray_frame.shape[0], gray_frame.shape[1])
-        gray_masked = cv2.bitwise_and(gray_frame, gray_frame, mask=mask)
-        color_masked = cv2.bitwise_and(frame, frame, mask=mask)
+        gray_masked = gray_frame  # I laze change name haha
+        # color_masked = cv2.bitwise_and(frame, frame, mask=mask)
         # gray_masked = gray_frame
         # color_masked = frame
 
         # Gaussian blur to smooth image
         # Blurred HSV (Colour)
-        blurred_color = cv2.GaussianBlur(color_masked, (5, 5), 0)  
-        hsv = cv2.cvtColor(blurred_color, cv2.COLOR_BGR2HSV)
+        # blurred_color = cv2.GaussianBlur(color_masked, (5, 5), 0)  
+        # hsv = cv2.cvtColor(blurred_color, cv2.COLOR_BGR2HSV)
         # Blurred Gray (Grayscale)
-        # blurred_gray = cv2.GaussianBlur(gray_masked, (5, 5), 0)
-        blurred_gray = gray_masked
+        # gray_masked = cv2.GaussianBlur(gray_masked, (5, 5), 1)
+
+        # Note to future: bilateral 5/6 is okay for the normal part of the track
+        # Don't ask why. Do not comment out the bilateral filter else noisy.
+        gray_masked = cv2.bilateralFilter(gray_masked, 6, 25, 25)  # makes colour similoar or something - easier to contrast and group similar greys
+
+
+        # Enhance contrast: Contrast stretching
+        min_val, max_val = np.percentile(gray_masked[mask > 0], [50, 98])  # Avoid outliers - higher the first value, the more aggressive it changes greys to blacks (black point), higher second value means that less whitish pixels are whites
+        if max_val > min_val:  # Avoid division by zero
+            gray_contrast = np.clip((gray_masked - min_val) * 255.0 / (max_val - min_val), 0, 255).astype(np.uint8)
+        else:
+            gray_contrast = gray_masked
+
+        # Optional: Apply CLAHE for adaptive contrast enhancement
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        gray_contrast = clahe.apply(gray_contrast)
+
 
         # Use Canny edge detection - lower threshold, higher threshold
-        # TODO: Tune and see which value works better
-        hsv_edges = cv2.Canny(hsv, 75, 150)
-        gray_edges = cv2.Canny(blurred_gray, 75, 150)
+        # hsv_edges = cv2.Canny(hsv, 75, 150)
+        gray_edges_full = cv2.Canny(gray_contrast, 100, 150)
+        # Apply mask after so canny cannot pick ROI edges as candidate left/right lines
+        gray_edges = cv2.bitwise_and(gray_edges_full, gray_edges_full, mask=mask)
 
         # Detect lines using HoughLinesP (instead of HoughLine because of computational power)
-        # Hough lines
-        gray_lines = cv2.HoughLinesP(gray_edges, 1, np.pi / 180, threshold=50, maxLineGap=50)
-        hsv_lines = cv2.HoughLinesP(hsv_edges, 1, np.pi / 180, threshold=50, maxLineGap=50)
+        # Hough lines - threshold is for removing weak lines, maxLineGap is how many small lines to combine
+        # threshold 65 updates fast enough without too much shaking of the vanishing point
+        # max linbe gap 30 gives us enough hough lines groupss to average
+        gray_lines = cv2.HoughLinesP(gray_edges, 1, np.pi / 180, threshold=65, maxLineGap=30)
+        # hsv_lines = cv2.HoughLinesP(hsv_edges, 1, np.pi / 180, threshold=50, maxLineGap=50)
 
         thicc = 2  # Line thiccness for drawing
-
 
         # Old implementation: This one just gets all hough lines so there is a lot of noise
         # # Draw lines on color image
@@ -167,12 +199,16 @@ class LaneFollowing(Node):
         #     for line in hsv_lines:
         #         x1, y1, x2, y2 = line[0]
         #         cv2.line(color_masked, (x1, y1), (x2, y2), (0, 255, 0), thicc) 
+        masked_hough = cv2.bitwise_and(frame, frame, mask=mask)  # debug what mask see
+        # Optional: draw lines on grayscale image
+        if gray_lines is not None:
+            for line in gray_lines:
+                x1, y1, x2, y2 = line[0]
+                cv2.line(masked_hough, (x1, y1), (x2, y2), (255, 128, 128), thicc)
+        cv2.imshow("hough with mask", masked_hough)
+        # cv2.imshow("hough with mask", gray_contrast) 
+        cv2.waitKey(1)
 
-        # # Optional: draw lines on grayscale image
-        # if gray_lines is not None:
-        #     for line in gray_lines:
-        #         x1, y1, x2, y2 = line[0]
-        #         cv2.line(gray_masked, (x1, y1), (x2, y2), 255, thicc)
 
         # New version: Filtered hough lines by gradient and pick them out by possible groups
         # Just need to use grayscale tbh
@@ -186,11 +222,13 @@ class LaneFollowing(Node):
                 if x2 - x1 == 0:
                     continue  # skip vertical lines
                 slope = (y2 - y1) / (x2 - x1)
-                if abs(slope) < 0.1:
+                if abs(slope) < 0.15:
                     continue  # filter out near-horizontal lines
-                if slope < 0 and x1 < frame.shape[1] // 2 and x2 < frame.shape[1] // 2:
+
+                # Slacken the condition to be having 3/4 on either side, and correct gradient
+                if slope < 0 and x1 < frame.shape[1] * 3 // 4 and x2 < frame.shape[1] * 3// 4:
                     left_lines.append((x1, y1, x2, y2))
-                elif slope > 0 and x1 > frame.shape[1] // 2 and x2 > frame.shape[1] // 2:
+                elif slope > 0 and x1 > frame.shape[1] // 4 and x2 > frame.shape[1] // 4:
                     right_lines.append((x1, y1, x2, y2))
 
         left_fit = self.average_line(left_lines)
@@ -207,6 +245,8 @@ class LaneFollowing(Node):
 
         # if left_fit is not None and right_fit is not None:
         #     self.get_logger().info("Found left and right")
+        if self.left_lane is None or self.right_lane is None:
+            return
 
         # If both lines exist, compute vanishing point and CTE for PID
         # Vanishing point tells us the direction to chase
@@ -216,9 +256,14 @@ class LaneFollowing(Node):
             if m1 != m2:
                 vp_y = int((b2 - b1) / (m1 - m2))
                 vp_x = int(m1 * vp_y + b1)
-                cv2.circle(color_masked, (vp_x, vp_y), 5, (0, 0, 255), -1)
-                self.error = frame.shape[1] // 2 - vp_x
-                self.pid_controller.update_control(self.error)
+                cv2.circle(frame, (vp_x, vp_y), 5, (0, 0, 255), -1)
+                new_error = gray_frame.shape[1] // 2 - vp_x
+                # Limit error change via thresholding how much a vanishing point can jump
+                # if abs(new_error - self.error) > self.max_error_change:
+                #     new_error = self.error + np.sign(new_error - self.error) * self.max_error_change
+                bias = 9.0  # our car has funnjy drift not sure if linear - higher means more right bias - 9.0 for straights
+                self.error = new_error + bias
+                # self.pid_controller.update_control(self.error)
 
 
         # Draw avg left and right lines on color image (we calculate on gray, but color is easier to debug)
@@ -226,17 +271,12 @@ class LaneFollowing(Node):
         if self.left_lane is not None:
             x1 = int(self.left_lane[0] * y1 + self.left_lane[1])
             x2 = int(self.left_lane[0] * y2 + self.left_lane[1])
-            cv2.line(color_masked, (x1, y1), (x2, y2), (0, 255, 0), thicc)  # Green
+            cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 0), thicc)  # Green
 
         if self.right_lane is not None:
             x1 = int(self.right_lane [0] * y1 + self.right_lane [1])
             x2 = int(self.right_lane [0] * y2 + self.right_lane [1])
-            cv2.line(color_masked, (x1, y1), (x2, y2), (255, 0, 0), thicc)  # Blue
-        
-        # Debug window if running on local machine
-        # cv2.imshow("Gray Masked", gray_masked)
-        # cv2.imshow("Color Masked with Lines", color_masked)
-        # cv2.waitKey(1)
+            cv2.line(frame, (x1, y1), (x2, y2), (255, 0, 0), thicc)  # Blue
 
 
         # Publish masked grayscale image with lines
@@ -244,10 +284,14 @@ class LaneFollowing(Node):
         # self.masked_gray_img_pub.publish(gray_msg)
 
         # Publish masked color image with lines
-        color_msg = self.bridge.cv2_to_imgmsg(color_masked, encoding='bgr8')
+        color_msg = self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')
         self.masked_color_img_pub.publish(color_msg)
 
-        # self.get_logger().info("Masked image published")
+        # Debug Contrast + ROI
+
+        cv2.imshow("hough lines", frame)
+        cv2.waitKey(1)
+
 
         # Combined image version
         # combined = np.hstack((frame, cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR), cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)))
@@ -256,10 +300,14 @@ class LaneFollowing(Node):
 
 
     def update_callback(self):
-        # Publish velocity commands
+        # Publish velocity commands every control cycle
         cmd_vel = Twist()
         cmd_vel.linear.x = min(self.forward_speed, 1.0)  # Cap at full throttle of 1.0
-        cmd_vel.angular.z = self.pid_controller.get_control()  # based on PID correction
+        self.pid_controller.update_control(self.error)  # Reasoning for this is that the control loop is a lot faster than the image loop - some of the PID calculations e.g integral and derivation evolve over time
+        correction = self.pid_controller.get_control()  # based on PID correction
+        # self.get_logger().info(f"error: {self.pid_controller.prev_error} angular_z: {correction} latency: {(self.pid_controller.last_control - self.pid_controller.last_update).total_seconds() * 1000}")
+        cmd_vel.angular.z = max(min(correction, 3.0), -3.0)  # clamp just in case, roughly Pi radians
+        self.get_logger().info(f"error: {self.pid_controller.prev_error} angular_z: {cmd_vel.angular.z} rad/s")      
         self.cmd_vel_pub.publish(cmd_vel)
 
 def main(args=None):
