@@ -28,7 +28,15 @@ MCL/particle filter gives global accuracy of position in world, as compared to V
 
 This is painfully slow and has high overhead however so its only computed like 1Hz to confirm the position of the car (Odom is computed via EKF constantly).
 
-## Sub-Problems
+## Follow-up after some work on a Particle Filter: But are you being redundant to do MCL when Rtabmap is on
+
+Yup, and our misunderstanding of the capabilities of Rtabmap made us overthink the implementation at first. The idea is the same though, instead of using Particle Filter to manually calculate the mean and covariance of the robot's localisation in the world, we instead use Rtabmap which also returns a `PoseWithCovarianceStamped` from `rtabmap/localization_pose` topic, and pick the most trusted estimate of the detected object position in the world via adding the covariances of the measurement of the objects (`ObjectsStamped`) from `zed/zed_node/obj_det/objects` and the covariance from the position `/rtabmap/localization_pose`.
+
+Then if the variance (`tr(covariance)`) of the resulting covariance of the observation of an object is < the previous variance then update the entry in in the dictionary. The only problem is how to distinguish two objects of the same class detected, but this can be roughly figured out by the clustering the positions of the objects seen before saving into a CSV.
+
+The other part of the problem is that since `zed/zed_node/obj_det/objects` is using a shitty estimate of position in a local odometry (it returns in world frame but its still made via a transforms including the bad odometry from visual interial odometry), we want to convert its objects back to be relative to camera frame. Then we can calculate the more accurate position of the object in the map frame since we know the position of the robot in map frame from `rtabmap/localization_pose`, we can transform the position of the object from camera frame to map frame (which is a more accurate value).
+
+## Sub-Problems (for the very complex initial idea for Particle filtering - before we realized how redundant it was given Rtabmap exists)
 ### Sub-Problem 1: Localization of robot in a known map
 The first sub problem is localization in a known map, by finding the robot's position in the world space based on a known map.
 
@@ -173,13 +181,13 @@ Here is the thing. The problem with the throttle not being 1.0m/s and stuff is n
 ### Measurement model: Position of points in pointcloud
 Rather than use the objects detected as landmarks (we opt for this in our report), the fact that we have a point cloud map means that we can figure out what points are seen in a pointcloud. This can then be used to update our particle's possibly of hypothesis.
 
-## How to test our model?
+## How to test our model? For the simplified version using Rtabmap capabilities to localize the LapBot
 
 Technically, we can test our model anywhere, even not on the racetrack or without a battery to run the motors. 
 
-All we need to do is to set up the objects, carry the robot around to build a pointcloud map using Rtabmap. If we can loop closure, even better!
+All we need to do is to set up the objects, carry the robot around to build a pointcloud map using Rtabmap. This will becomes the known map for testing. In our case, we did this in the lab by placing down the objects in a position and pushing our car back and forth!
 
-Now, we can run our test script, set the initial position of the robot in the world, and then carry it around and let it perform its localization.
+Now, we can run rtabmap with the database selected, start our node logic to deal with getting objects from zed2, then push it around the world encountering obstacles.
 
 ## ROS2 Topics for Zed2 camera
 `/zed/zed_node/pose` - `Pose` Camera pose referred to Map frame (complete data fusion applied) - Can be used to get current position in space
