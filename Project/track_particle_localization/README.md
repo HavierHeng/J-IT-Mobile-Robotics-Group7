@@ -8,6 +8,14 @@ To solve these however, we need two things:
 1) Where is the robot position in the world frame? This is the reason why we cannot just trust the `ObjectsStamped` position returned by Zed2, its because its Odometry is messed up. Meanwhile, if we use a particle filter to re-estimate our position, then it would go beyond just trusting the virtual odometry, but instead counter checking the odometry against the known map.
 2) Where is the Object of classification X in the camera frame? The reason why we turn it back to the camera frame is so we can do a transformation to be relative to the world frame based on the robot position estimate using (1). Internally, zed2 transforms the objects it detects to world frame -> But this uses the shitty estimate of Odometry.
 
+## Implementations
+Initially our team thought this problem was about monte carlo localization - but this was pretty complex, the logic is still explained below.
+
+But then we realized we could just use Rtabmap for localization (replacing the need for even writing MCL), then track the confidence of an object position via its covariance from the robot's pose and the object measurement.
+
+For the SLAM version we explored, we know we have no maps, so it works via building a huge covariance matrix of landmarks as we explore the world. Optimally, the points are double confirmed via loop closure.
+
+
 ## Are you being redundant to do MCL when Zed2 already gives you a position using Visual Inertia Odometry?
 
 VIO (like the ZED2's output) gives you relative pose estimates, usually with high short-term precision but long-term drift due to:
