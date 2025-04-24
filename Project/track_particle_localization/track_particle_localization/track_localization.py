@@ -1,14 +1,5 @@
 #!/usr/bin/env python3
 
-"""
-Pseudo dump (help panik): # Will load in a set of waypoints in yaml from a precorded waypoint building spree on Rtabmap - these contain: waypoint_id, (x, y, z), (quaternion i,j ,k,l) - using our subscriber script. Assume last entry is the end goal...
-# waypoint_purpose/class(?) - tells the robot that to behave differently after navigating to waypoint
-# Using the waypoints (assuming it does not run into the objects), it will try to navigate to the position - this can be done with inspiration from the Proportional controller from bag follower hw.
-# use the same logic from the original particle_localization to store the csv using the trustability
-"""
-
-#!/usr/bin/env python3
-
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy

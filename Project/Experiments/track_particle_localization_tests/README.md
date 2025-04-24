@@ -25,54 +25,29 @@ There is also a need for a way for us to control our robot to autonomously get t
 ### Waypoints - how to mark and load them?
 
 Our team uses a custom utility made by ourselves called `pose_logger`.
+Because we know that in the RViz launched by Rtabmap, we can "Publish 2D Goal Pose" and then see this `Pose` via `/rtabmap/goal` , we generate a custom YAML file with a few fields (some of them are for behaviour control later:
+- id: To name/order our waypoints
+- Point (x,y,z): 3 different fields, for the `Point` x, y, z
+- Quaternion (w, x, y, z): 4 different fields, for the `Quaternion` w, x, y, z
+- action: 
 
-Because we know that in the RViz launched by Rtabmap, we can "Publish 2D Goal Pose" and then see this `Pose` via `/rtabmap/goal` , we generate a custom YAML file with a few fields (some of them are for behaviour control later):
-- id: To name/order our waypoints. Can be changed for ease of use
-- action: Behaviour control, changed by hand to mark robot behaviours. "navigate" means that when reaching waypoint, immedately follow to next waypoint. "stop", when reach waypoint, robot pauses.
-- point (x,y,z): 3 different fields, for the `Point` x, y, z
-- quaternion (w, x, y, z): 4 different fields, for the `Quaternion` w, x, y, z
-
-The last waypoint marked is always assumed to be the final goal pose.
-
-### Waypoints - how to get there
+### Waypoints how to get there
 This part needs us to tune 2 simple P controllers for linear and angular velocity based on the desired position and angle at waypoint
-- This is as our car has some drift, we need a P controller to at least pull it back to the waypoint
+- This is as our car has some drift
 
-The linear.x are capped to 1.0, while angular.z are capped to -3.0 to 3.0. These were fixed in the microros code in the arduino.
 
-Car also has some funny issue with reversing.
-
-### Static world assumption - dynamic objects as noise rather than objects
+### Static world assumption - dynamic objects as noise
 If we assume static world assumption, this means that observed objects with a velocity higher than some threshold is considered an invalid candidate.
 
-We seen this issue with runners on the track. We only want to track non-moving Persons. We will then filter them out in the actual run
+We can use a temporal filter to check this based on the timestamp of observation. Then calculate the velocity of objects by a naive check of if class matches up
 
-Calculate the velocity of objects by tracking their positions over a sliding window:
-1) See if there is a minimum number of observations of said object in the sliding window. 
-2) Estimate the velocity of objects
-- If there are multiple objects of same class, to tell if the objects are the same or different, we can use a small threshold of position between old and new positions
+### Data processing and Clustering
 
-### Data processing and Clustering Tuning
-
-Since we want to know what DBScan cluster size to scan, but it would be stupid to keep running the robot to figure out this value.
-
-Drive around and collect data on observations, Plot on matplotlib the global real world positions of all things seen using all_observations.csv and best_observations.csv. (Debug mode for car will generate a lot of data for visualizations, including velocities of any objects)
-
-After the robot generates two `.csv` files, one for all observations, another for the summarized best observations, we can use the all observation ones to try to get it to observe clustering.
-- Plot 1: Fit Global real world positions with different DBSCAN sizes 
-- Plot 2 (Prove batched DBSCAN sucks): Scatter plot against unique timestamp of scan they were seen in - so we can see how many objects were seen at each scan and prove that batching the DBSCAN instead of doing a global DBSCAN clustering over the final set is just better
-
+Since
 
 ### Covariance and variance to summarize the final values to CSV
 
 Get the mean and covariance of the robot's localisation in the world, using Rtabmap which also returns a `PoseWithCovarianceStamped` from `rtabmap/localization_pose` topic, and pick the most trusted estimate of the detected object position in the world via adding the covariances of the measurement of the objects (`ObjectsStamped`) from `zed/zed_node/obj_det/objects` and the covariance from the position `/rtabmap/localization_pose`.
-
-The math works via transforming all the covariance matrices to the same map frame for the observations (originally in `odom` frame due to Zed2) and camera (originally already in `map` frame due to RTabmap), account for:
-- obj_cov: Uncertainty of pos_odom in odom frame.
-- robot_cov: Uncertainty of t_mc and R_mc in map frame (from RTabMap).
-- odom_cov: Uncertainty of t_oc and R_oc in odom frame (from ZED2’s /zed/zed_node/pose
-
-We can do this by applying transforms to the covariances until all are in map frame. Take into account changing the object in camera frame -> object in odom frame -> object in map frame. Then this can be added to the covariance of the robot position in map.
 
 Then if the variance (`tr(covariance)`) of the resulting covariance of the observation of an object is < the previous variance then update the entry in in the dictionary. The only problem is how to distinguish two objects of the same class detected, but this can be roughly figured out by the clustering the positions of the objects seen before saving into a CSV.
 

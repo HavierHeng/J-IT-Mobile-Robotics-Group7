@@ -1,6 +1,6 @@
 from setuptools import setup
 
-package_name = 'track_particle_localization'
+package_name = 'track_follower_challenge'
 
 setup(
     name=package_name,
@@ -20,8 +20,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'simple = track_particle_localization.track_localization:main',
-            'get_map_size = track_particle_localization.rtabmap_size:main'
+            'track_follower = track_follower_challenge.track_follower:main',
+            'aruco_relay = track_follower_challenge.aruco_relay:main',
         ],
     },
 )
