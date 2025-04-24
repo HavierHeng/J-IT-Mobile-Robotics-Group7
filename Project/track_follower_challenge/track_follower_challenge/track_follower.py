@@ -70,12 +70,13 @@ class LaneFollowing(Node):
 
         self.pid_controller = PID(Kp, Kd, Ki)
 
-        # Cache old values
+        # Cache old values - needed since car doesn't see left/right lanes every frame consistently 
         self.left_lane = None
         self.right_lane = None
 
         # Threshold for when to update error
         self.max_error_change = 20  # How much max pixel jump between updates
+        self.bias = 9.0  # our car has funnjy drift not sure if linear - higher means more right bias - 9.0 for straights
 
         # Create subscription to camera images
         # Use the rectified image from the Zed2 camera
@@ -261,8 +262,7 @@ class LaneFollowing(Node):
                 # Limit error change via thresholding how much a vanishing point can jump
                 # if abs(new_error - self.error) > self.max_error_change:
                 #     new_error = self.error + np.sign(new_error - self.error) * self.max_error_change
-                bias = 9.0  # our car has funnjy drift not sure if linear - higher means more right bias - 9.0 for straights
-                self.error = new_error + bias
+                self.error = new_error + self.bias
                 # self.pid_controller.update_control(self.error)
 
 
