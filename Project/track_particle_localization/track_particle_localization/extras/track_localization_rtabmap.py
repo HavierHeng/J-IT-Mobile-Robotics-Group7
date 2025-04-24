@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 
+
+# Legacy Object Tracker code 
+# Doesn't drive - only puts things into image
+
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy

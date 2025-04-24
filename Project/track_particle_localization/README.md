@@ -11,7 +11,14 @@ To solve these however, we need two things:
 ## Implementations
 Initially our team thought this problem was about monte carlo localization - but this was pretty complex, the logic is still explained below.
 
-But then we realized we could just use Rtabmap for localization (replacing the need for even writing MCL), then track the confidence of an object position via its covariance from the robot's pose and the object measurement.
+But then we realized we could just use Rtabmap for localization (replacing the need for even writing MCL), then track the confidence of an object position via its covariance from the robot's pose and the object measurement. This version also comes with autonomous movement. 
+- Either it uses a pre-planned path via `/rtabmap/mapGraph` 
+- Or custom waypoints/goals which we set ourselves 
+- If we do Rtabmap, we can set points via Publish 2D Points and follow them by subscribing. The challenge is to find out which topic gives us waypoints to track when RTabmap runs in localization mode.
+- Some hints: http://official-rtab-map-forum.206.s1.nabble.com/How-to-label-nodes-and-send-goals-from-rtabmap-interface-td903.html
+- Rtabmap provides goal points via `/rtabmap/goal_node`.
+- For `/rtabmap/goal` topic, this is used for the human controller from RVIZ to tell the robot a goal point, the pose is transformed in map frame before planning, but its not very useful to use given autonomy.
+
 
 For the SLAM version we explored, we know we have no maps, so it works via building a huge covariance matrix of landmarks as we explore the world. Optimally, the points are double confirmed via loop closure.
 

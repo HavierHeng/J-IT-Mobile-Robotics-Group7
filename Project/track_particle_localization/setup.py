@@ -22,7 +22,9 @@ setup(
         'console_scripts': [
             'amcl = track_particle_localization.track_localization_amcl:main',
             'mapped = track_particle_localization.track_localization_rtabmap:main',
+            'auto = track_particle_localization.track_localization_autonomous:main',
             'slam = track_particle_localization.track_localization_rtabmap_slam:main',
+            'simple = track_particle_localization.track_localization_simple:main',
             'get_map_size = track_particle_localization.rtabmap_size:main'
         ],
     },
