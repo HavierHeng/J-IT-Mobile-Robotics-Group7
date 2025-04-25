@@ -21,7 +21,6 @@ class GoalPoseLogger(Node):
         self.get_logger().info("GoalPoseLogger node started.")
 
     def listener_callback(self, msg):
-        self.counter += 1
         log_entry = {
             'id': self.counter,
             'action': 'navigate',
@@ -39,6 +38,7 @@ class GoalPoseLogger(Node):
                 }
             }
         }
+        self.counter += 1
         self.pose_log.append(log_entry)
         self.get_logger().info(f"Logged Pose #{self.counter}")
 
