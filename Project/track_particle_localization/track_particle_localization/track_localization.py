@@ -57,7 +57,7 @@ class WaypointNavigator(Node):
         self.declare_parameter('min_variance_threshold', 0.01)  # Maximum allowed minimum variance for a cluster to be valid
 
         # Filtering for runners
-        self.declare_parameter('time_window', 10.0)  # Time window (s) for considering recent observations
+        self.declare_parameter('time_window', 200.0)  # Time window (s) for considering recent observations
         self.declare_parameter('velocity_threshold', 0.7)  # Velocity (m/s) above which objects are considered moving and ignored
         self.declare_parameter('match_radius', 0.5)  # Radius (m) for matching objects to previous observations
         self.declare_parameter('velocity_window', 1.0)  # Time window (s) for velocity calculations
@@ -599,7 +599,7 @@ class WaypointNavigator(Node):
                     self.object_dict[self.object_id_counter] = {
                         'class': best_obs['class'],
                         'position': best_obs['position'],
-                        ' variance': best_obs['variance'],
+                        'variance': best_obs['variance'],
                         'raw_obj': best_obs['raw_obj']
                     }
                     self.publish_shadow(
