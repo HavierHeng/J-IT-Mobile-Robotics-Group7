@@ -5,120 +5,67 @@ Data visualization script to help us bruteforce to find the best DBScan paramete
 - Since our clustering affects how we summarize the final CSV
 """
 
-import matplotlib.pyplot as plt
-import numpy as np
 import pandas as pd
+import numpy as np
 from sklearn.cluster import DBSCAN
+import matplotlib.pyplot as plt
 import seaborn as sns
 
-# Load data
-all_obs_df = pd.read_csv('all_observations.csv')
-static_obs_df = pd.read_csv('objects.csv')
+def load_observations(csv_file, class_filter='person', time_window=10.0):
+    """Load and filter observations from all_observations.csv."""
+    df = pd.read_csv(csv_file)
+    df['Timestamp'] = df['Timestamp'].astype(float)
+    max_time = df['Timestamp'].max()
+    df = df[(df['Timestamp'] >= max_time - time_window) & (df['Class'] == class_filter)]
+    return df
 
-# Parameters to test
-eps_values = [1.0, 2.0, 3.0]
-min_samples_values = [3, 5, 7]
-
-# Global Cluster Plot
-plt.figure(figsize=(10, 8))
-for eps in eps_values:
-    for min_samples in min_samples_values:
-        classes = all_obs_df['Class'].unique()
-        plt.clf()
-        plt.title(f'Global DBSCAN Clustering (eps={eps}, min_samples={min_samples})')
-        plt.xlabel('X (m)')
-        plt.ylabel('Y (m)')
-        plt.grid(True)
-
-        for cls in classes:
-            cls_data = all_obs_df[all_obs_df['Class'] == cls]
-            positions = cls_data[['X', 'Y']].values
-
-            # Run DBSCAN
-            clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(positions)
-            labels = clustering.labels_
-
-            # Plot observations colored by velocity
-            scatter = plt.scatter(
-                cls_data['X'], cls_data['Y'],
-                c=cls_data['Velocity'], cmap='viridis', alpha=0.5, s=50,
-                label=f'{cls} (raw)'
-            )
-            plt.colorbar(scatter, label='Velocity (m/s)')
-
-            # Plot clusters
-            unique_labels = set(labels) - {-1}
-            for label in unique_labels:
-                mask = labels == label
-                plt.scatter(
-                    positions[mask, 0], positions[mask, 1],
-                    label=f'{cls} Cluster {label}', s=100, marker='o'
-                )
-
-            # Plot noise
-            noise_mask = labels == -1
-            if np.any(noise_mask):
-                plt.scatter(
-                    positions[noise_mask, 0], positions[noise_mask, 1],
-                    c='gray', marker='x', s=50, label='Noise'
-                )
-
-        # Plot static objects
-        for _, row in static_obs_df.iterrows():
-            plt.scatter(
-                row['X'], row['Y'], c='black', marker='*', s=200,
-                label='Static Object' if _ == 0 else None
-            )
-
-        plt.legend()
-        plt.savefig(f'global_dbscan_eps{eps}_min{min_samples}.png')
-        plt.clf()
-
-# Sanity Check: Local Clustering Plot
-plt.figure(figsize=(10, 8))
-all_obs_df['Timestep'] = all_obs_df['Timestamp'].round(1)
-timesteps = all_obs_df['Timestep'].unique()
-max_plots = 16
-timesteps_to_plot = timesteps[:max_plots]
-rows = int(np.ceil(np.sqrt(len(timesteps_to_plot))))
-cols = int(np.ceil(len(timesteps_to_plot) / rows))
-
-for i, timestep in enumerate(timesteps_to_plot):
-    plt.subplot(rows, cols, i+1)
-    data = all_obs_df[all_obs_df['Timestep'] == timestep]
-    positions = data[['X', 'Y']].values
-
-    clustering = DBSCAN(eps=2.0, min_samples=5).fit(positions)
+def plot_clusters(df, eps=2.0, min_samples=5, output_file='global_dbscan.png'):
+    """Apply DBSCAN and plot clusters."""
+    positions = df[['X', 'Y']].values
+    clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(positions)
     labels = clustering.labels_
+    n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+    n_noise = list(labels).count(-1)
 
-    for cls in data['Class'].unique():
-        cls_data = data[data['Class'] == cls]
-        plt.scatter(
-            cls_data['X'], cls_data['Y'],
-            label=cls, alpha=0.5, s=50
-        )
-
-    unique_labels = set(labels) - {-1}
-    for label in unique_labels:
-        mask = labels == label
-        plt.scatter(
-            positions[mask, 0], positions[mask, 1],
-            label=f'Cluster {label}', s=100, marker='o'
-        )
-
-    noise_mask = labels == -1
-    if np.any(noise_mask):
-        plt.scatter(
-            positions[noise_mask, 0], positions[noise_mask, 1],
-            c='gray', marker='x', s=50, label='Noise'
-        )
-
-    plt.title(f'Timestep {timestep:.1f}s')
+    # Plot
+    plt.figure(figsize=(10, 8))
+    sns.scatterplot(x=df['X'], y=df['Y'], hue=labels, palette='deep', style=(labels == -1), size=(labels == -1))
+    for label in set(labels):
+        if label == -1:
+            continue
+        cluster_points = positions[labels == label]
+        centroid = np.mean(cluster_points, axis=0)
+        plt.scatter(centroid[0], centroid[1], c='red', marker='x', s=200, label='Centroids' if label == min(set(labels)) else None)
+    plt.title(f'DBSCAN Clustering (eps={eps}, min_samples={min_samples})\nClusters: {n_clusters}, Noise: {n_noise}')
     plt.xlabel('X (m)')
     plt.ylabel('Y (m)')
-    plt.grid(True)
     plt.legend()
+    plt.savefig(output_file)
+    plt.close()
 
-plt.tight_layout()
-plt.show()
-# plt.savefig('local_dbscan_sanity_check.png')
+    # Print stats
+    print(f"Number of clusters: {n_clusters}")
+    print(f"Number of noise points: {n_noise}")
+    for label in set(labels):
+        if label == -1:
+            continue
+        cluster_df = df[labels == label]
+        print(f"Cluster {label}: {len(cluster_df)} points, Avg Variance: {cluster_df['Variance'].mean():.4f}")
+
+def main():
+    csv_file = 'all_observations.csv'
+    class_filter = 'person'  # Adjust based on your object classes
+    time_window = 10.0  # Match track_localization.py's time_window
+    eps = 2.0  # Match cluster_distance
+    min_samples = 5  # Match min_observations
+
+    df = load_observations(csv_file, class_filter, time_window)
+    if df.empty:
+        print("No observations found for class", class_filter)
+        return
+    output_file = f'global_dbscan_eps{eps}_min{min_samples}.png'
+    plot_clusters(df, eps, min_samples, output_file)
+    print(f"Plot saved as {output_file}")
+
+if __name__ == '__main__':
+    main()

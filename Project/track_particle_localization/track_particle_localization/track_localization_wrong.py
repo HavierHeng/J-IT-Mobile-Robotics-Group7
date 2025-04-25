@@ -4,8 +4,8 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 import tf_transformations as tr
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist, Point
-from nav_msgs.msg import OccupancyGrid, Path
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, Twist
+from nav_msgs.msg import OccupancyGrid
 from zed_interfaces.msg import ObjectsStamped
 from visualization_msgs.msg import Marker
 from std_msgs.msg import ColorRGBA, Float32
@@ -53,17 +53,6 @@ class WaypointNavigator(Node):
         # Cluster performance
         self.declare_parameter('cluster_distance', 2.0)
 
-        # Filtering for runnders
-        self.declare_parameter('time_window', 10.0)
-        self.declare_parameter('min_observations', 5)  # how many observations to consider it the same object
-        self.declare_parameter('velocity_threshold', 1.0)  # when to consider an object moving (to ignore)
-        self.declare_parameter('match_radius', 0.5)  # How close has an object has to be 
-        self.declare_parameter('velocity_window', 1.0)
-
-        # Debug logs all possible observations regardless of timestep in a csv for us to tune clustering
-        # Do not use this in real world test cos of overhead
-        self.declare_parameter('debug_mode', False)
-
         self.waypoint_file = self.get_parameter('waypoint_file').value
         self.waypoint_tolerance = self.get_parameter('waypoint_tolerance').value
         self.stop_duration = self.get_parameter('stop_duration').value
@@ -77,12 +66,6 @@ class WaypointNavigator(Node):
         self.max_distance = self.get_parameter('max_distance').value
         self.cluster_distance = self.get_parameter('cluster_distance').value
         self.backup_safety_distance = self.get_parameter('backup_safety_distance').value
-        self.time_window = self.get_parameter('time_window').value
-        self.min_observations = self.get_parameter('min_observations').value
-        self.velocity_threshold = self.get_parameter('velocity_threshold').value
-        self.match_radius = self.get_parameter('match_radius').value
-        self.velocity_window = self.get_parameter('velocity_window').value
-        self.debug_mode = self.get_parameter('debug_mode').value
 
         # Waypoint and navigation state
         self.waypoints = []
@@ -91,9 +74,7 @@ class WaypointNavigator(Node):
         self.stop_start_time = None
         self.last_cmd_vel = Twist()
 
-        # Object tracking
-        self.all_observations = []  # Full history (debug mode only)
-        self.recent_observations = []  # Sliding window for velocity filtering
+        # Object dictionary
         self.object_dict = {}
         self.object_id_counter = 0
         self.mutex = Lock()
@@ -141,12 +122,11 @@ class WaypointNavigator(Node):
         qos_profile = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self.shadow_pub = self.create_publisher(Marker, '/debug/object_shadow', qos_profile)
         self.distance_pub = self.create_publisher(Float32, '/debug/distance_to_object', qos_profile)
-        self.path_pub = self.create_publisher(Path, '/planned_path', qos_profile)
+        self.path_pub = self.create_publisher(nav_msgs.msg.Path, '/planned_path', qos_profile)
         self.cmd_vel_pub = self.create_publisher(Twist, '/cmd_vel', qos_profile)
 
-        # Timers
+        # Timer
         self.control_timer = self.create_timer(0.1, self.control_callback)
-        self.cluster_timer = self.create_timer(5.0, self.cluster_callback)
         self.pose_timeout = self.create_timer(5.0, self.check_pose)
 
         # Load waypoints
@@ -218,7 +198,7 @@ class WaypointNavigator(Node):
 
     def publish_path(self):
         """Publish waypoints as a Path message for RViz."""
-        path = Path()
+        path = nav_msgs.msg.Path()
         path.header.frame_id = 'map'
         path.header.stamp = self.get_clock().now().to_msg()
         path.poses = [wp['pose'] for wp in self.waypoints[self.current_waypoint_idx:]]
@@ -398,40 +378,6 @@ class WaypointNavigator(Node):
         finally:
             self.mutex.release()
 
-    def match_and_filter_objects(self, new_objects, current_time):
-        """Match new objects to recent observations and filter by velocity."""
-        filtered_objects = []
-        self.recent_observations = [o for o in self.recent_observations if current_time - o['timestamp'] <= self.velocity_window]
-
-        for obj in new_objects:
-            pos_map = np.array(obj['position'])
-            cls = obj['class']
-            velocity = None
-            min_dist = float('inf')
-            matched_obs = None
-
-            for prev_obs in self.recent_observations:
-                if prev_obs['class'] != cls:
-                    continue
-                prev_pos = np.array(prev_obs['position'])
-                dist = sqrt(sum((pos_map - prev_pos)**2))
-                if dist < min_dist and dist < self.match_radius:
-                    min_dist = dist
-                    matched_obs = prev_obs
-
-            if matched_obs:
-                dt = current_time - matched_obs['timestamp']
-                if dt > 0:
-                    velocity = min_dist / dt
-                    if velocity > self.velocity_threshold:
-                        self.get_logger().info(f"Discarded {cls} at {pos_map[:2]}: velocity {velocity:.2f} m/s")
-                        continue
-
-            obj['velocity'] = velocity if velocity is not None else 0.0
-            filtered_objects.append(obj)
-
-        return filtered_objects
-
     def objects_callback(self, msg):
         """
         Process detected objects and update dictionary.
@@ -443,7 +389,6 @@ class WaypointNavigator(Node):
             if self.robot_pose is None or self.R_odom_camera is None:
                 self.get_logger().warn("Missing robot pose or odometry. Skipping object processing.")
                 return
-            current_time = self.get_clock().now().nanoseconds / 1e9
             new_objects = []
 
             for obj in msg.objects:
@@ -455,112 +400,70 @@ class WaypointNavigator(Node):
                 if dist < self.min_distance or dist > self.max_distance:
                     continue
                 pos_map = self.R_map_camera @ pos_camera + self.t_map_camera
-                # Object covariance
                 obj_cov = np.array(obj.position_covariance).reshape(3, 3) if len(obj.position_covariance) == 9 else np.diag(obj.position_covariance[:3])
-                # Transform obj_cov to map frame
-                R_total = self.R_map_camera @ R_odom_to_camera
-                obj_cov_map = R_total @ obj_cov @ R_total.T
-                # Robot positional covariance (map frame)
-                robot_cov_3d = self.robot_cov[0:3, 0:3]
-                # Combine covariances
-                combined_cov = obj_cov_map + robot_cov_3d
+                robot_cov_2d = np.array([
+                    [self.robot_cov[0, 0], self.robot_cov[0, 1], 0],
+                    [self.robot_cov[1, 0], self.robot_cov[1, 1], 0],
+                    [0, 0, 0]
+                ])
+                combined_cov = obj_cov + self.R_map_camera @ robot_cov_2d @ self.R_map_camera.T
                 variance = np.trace(combined_cov)
-                self.get_logger().debug(f"Object {obj.label}: obj_cov_trace={np.trace(obj_cov):.4f}, robot_cov_trace={np.trace(robot_cov_3d):.4f}, combined_cov_trace={variance:.4f}")
                 new_objects.append({
                     'class': obj.label,
                     'position': pos_map.tolist(),
                     'variance': variance,
-                    'raw_obj': obj,
-                    'timestamp': current_time
+                    'raw_obj': obj
                 })
                 # Publish bounding box shadow for this object
                 self.publish_shadow(obj_id=len(new_objects)-1, raw_obj=obj, pos_map=pos_map)
 
             if new_objects:
                 self.get_logger().info(f"New objects: {[obj['class'] for obj in new_objects]}")
-                # Filter objects by velocity before clustering
-                filtered_objects = self.match_and_filter_objects(new_objects, current_time)
-                # Store observations
-                for obj in filtered_objects:
-                    self.recent_observations.append(obj)
-                    if self.debug_mode:
-                        self.all_observations.append(obj)
-                self.cluster_and_update_objects(filtered_objects)
+                self.cluster_and_update_objects(new_objects)
 
-                # Publish distance to nearest object
-                observations = self.all_observations if self.debug_mode else self.recent_observations
-                if observations:
-                    recent_obs = [o for o in observations if current_time - o['timestamp'] <= self.time_window]
-                    if recent_obs:
-                        nearest_obj = min(recent_obj, key=lambda o: sqrt(sum((np.array(o['position']) - self.t_map_camera)**2)))
-                        distance = sqrt(sum((np.array(nearest_obj['position'][:2]) - self.t_map_camera[:2])**2))
-                        distance_msg = Float32(data=float(distance))
-                        self.distance_pub.publish(distance_msg)
+                nearest_obj = min(new_objects, key=lambda o: sqrt(sum((np.array(o['position']) - self.t_map_camera)**2)))
+                distance = sqrt(sum((np.array(nearest_obj['position'][:2]) - self.t_map_camera[:2])**2))
+                distance_msg = Float32(data=float(distance))
+                self.distance_pub.publish(distance_msg)
         finally:
             self.mutex.release()
 
     def cluster_and_update_objects(self, new_objects):
         """Cluster objects by position and update dictionary."""
-        self.mutex.acquire()
-        try:
-            current_time = self.get_clock().now().nanoseconds / 1e9
-            # Select observation source
-            observations = self.all_observations if self.debug_mode else self.recent_observations
-            # Prune to time_window
-            observations = [o for o in observations if current_time - o['timestamp'] <= self.time_window]
-            if not self.debug_mode:
-                self.recent_observations = observations
-            # Add new objects to observations
-            observations.extend(new_objects)
-            if not observations:
-                return
-
-            class_groups = {}
-            for obs in observations:
-                cls = obs['class']
-                if cls not in class_groups:
-                    class_groups[cls] = []
-                class_groups[cls].append(obs)
-
-            self.object_dict.clear()
-            self.object_id_counter = 0
-
-            for cls, cls_observations in class_groups.items():
-                positions = np.array([o['position'][:2] for o in cls_observations])
-                if len(positions) < self.min_observations:
-                    continue
-
-                clustering = DBSCAN(eps=self.cluster_distance, min_samples=self.min_observations).fit(positions)
-                labels = clustering.labels_
-
-                for label in set(labels):
-                    if label == -1:
-                        continue
-                    cluster_obs = [o for i, o in enumerate(cls_observations) if labels[i] == label]
-                    if len(cluster_obs) < self.min_observations:
-                        continue
-
-                    best_obs = min(cluster_obs, key=lambda o: o['variance'])
-                    self.object_dict[self.object_id_counter] = {
-                        'class': best_obs['class'],
-                        'position': best_obs['position'],
-                        'variance': best_obs['variance'],
-                        'raw_obj': best_obs['raw_obj']
+        positions = np.array([o['position'][:2] for o in new_objects])
+        if len(positions) == 0:
+            return
+        clustering = DBSCAN(eps=self.cluster_distance, min_samples=1).fit(positions)
+        labels = clustering.labels_
+        for label in set(labels):
+            if label == -1:
+                continue
+            cluster_objs = [o for i, o in enumerate(new_objects) if labels[i] == label]
+            cluster_positions = np.array([o['position'][:2] for o in cluster_objs])
+            best_match_id = None
+            min_dist = float('inf')
+            cluster_center = np.mean(cluster_positions, axis=0)
+            for obj_id, data in self.object_dict.items():
+                pos = np.array(data['position'][:2])
+                dist = sqrt(sum((pos - cluster_center)**2))
+                if dist < min_dist and data['class'] == cluster_objs[0]['class']:
+                    min_dist = dist
+                    best_match_id = obj_id
+            best_obj = min(cluster_objs, key=lambda o: o['variance'])
+            if best_match_id is not None and min_dist < self.cluster_distance:
+                if best_obj['variance'] < self.object_dict[best_match_id]['variance']:
+                    self.object_dict[best_match_id] = {
+                        'class': best_obj['class'],
+                        'position': best_obj['position'],
+                        'variance': best_obj['variance']
                     }
-                    self.publish_shadow(
-                        obj_id=self.object_id_counter,
-                        raw_obj=best_obs['raw_obj'],
-                        pos_map=np.array(best_obs['position'])
-                    )
-                    self.object_id_counter += 1
-
-            self.get_logger().info(f"Clustered {len(observations)} observations into {len(self.object_dict)} static objects")
-        finally:
-            self.mutex.release()
-
-    def cluster_callback(self):
-        """Periodically cluster observations to update static objects."""
-        self.cluster_and_update_objects([])  # Run clustering without new objects
+            else:
+                self.object_dict[self.object_id_counter] = {
+                    'class': best_obj['class'],
+                    'position': best_obj['position'],
+                    'variance': best_obj['variance']
+                }
+                self.object_id_counter += 1
 
     def publish_shadow(self, obj_id, raw_obj, pos_map):
         """Publish a bounding box shadow marker for the object in the map frame (based on Rtabmap accurate localization)."""
@@ -622,31 +525,9 @@ class WaypointNavigator(Node):
                     data['variance']
                 ])
 
-    def save_all_observations_to_csv(self, filename='all_observations.csv'):
-        """Save all observations to CSV for analysis (debug mode only)."""
-        with open(filename, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(['Timestamp', 'Class', 'X', 'Y', 'Z', 'Variance', 'Velocity'])
-            for obs in self.all_observations:
-                writer.writerow([
-                    obs['timestamp'],
-                    obs['class'],
-                    obs['position'][0],
-                    obs['position'][1],
-                    obs['position'][2],
-                    obs['variance'],
-                    obs['velocity']
-                ])
-
     def shutdown(self):
         """Save objects and cleanup."""
-        self.cluster_callback()
         self.save_objects_to_csv()
-        if self.debug_mode:
-            self.save_all_observations_to_csv()
-            self.get_logger().info("Saved all_observations.csv (debug mode)")
-        else:
-            self.get_logger().info("Skipped all_observations.csv (normal mode)")
         self.get_logger().info("Finished writing the csv")
         self.destroy_node()
 
