@@ -1,0 +1,12 @@
+- action: navigate
+  id: 0
+  pose:
+    orientation:
+      w: 0.9999614077835793
+      x: 0.0
+      y: 0.0
+      z: 0.008785382375414428
+    position:
+      x: 2.5
+      y: 0.0
+      z: 0.0

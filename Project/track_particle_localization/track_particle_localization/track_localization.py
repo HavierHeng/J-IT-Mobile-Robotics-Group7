@@ -13,56 +13,58 @@ from math import sqrt, atan2, cos, sin, pi
 import numpy as np
 import csv
 import yaml
-from threading import Lock
+from threading import RLock
 from sklearn.cluster import DBSCAN
+import time
 
 class WaypointNavigator(Node):
     def __init__(self):
         super().__init__('waypoint_navigator')
 
         # Waypoint configs
-        self.declare_parameter('waypoint_file', 'waypoints.yaml')
-        self.declare_parameter('waypoint_tolerance', 0.5)
+        self.declare_parameter('waypoint_file', '/home/nvidia/goal_poses_log.yaml')  # Path to YAML file containing waypoints
+        self.declare_parameter('waypoint_tolerance', 0.5)  # Distance threshold (m) to consider a waypoint reached
 
-        # Movement behvaiour 
+        # Movement behaviour 
         # cos we wanna see objects, we need to stop for a bit just to get good readings
         # backup safety just checks in the known map whether it is safe to move back using Occupancy grid map
-        self.declare_parameter('stop_duration', 2.0)
-        self.declare_parameter('backup_safety_distance', 1.0)
+        self.declare_parameter('stop_duration', 2.0)  # Duration (s) to pause at waypoints with 'stop' action
+        self.declare_parameter('backup_safety_distance', 1.0)  # Distance (m) to check for obstacles when backing up
 
         # Limits
-        self.declare_parameter('max_linear_velocity', 1.0)
-        self.declare_parameter('max_angular_velocity', 3.0)
+        self.declare_parameter('max_linear_velocity', 1.0)  # Maximum linear speed (m/s) for robot movement
+        self.declare_parameter('max_angular_velocity', 3.0)  # Maximum angular speed (rad/s) for robot rotation
 
         # Forwards Proportional turn is quite rigid
         # TODO: Maybe okay already - cos we tested these 
-        self.declare_parameter('proportional_gain_linear', 0.5)
-        self.declare_parameter('proportional_gain_angular', 1.0)
+        self.declare_parameter('proportional_gain_linear', 0.1)  # Proportional gain for forward linear velocity control
+        self.declare_parameter('proportional_gain_angular', 0.08)  # Proportional gain for forward angular velocity control
 
         # Backwards Proportional turn is very very sensitive in comparison
         # Move slower + less angular than forward
         # TODO: Tune - assumed to be lower than the forwards ones
-        self.declare_parameter('proportional_gain_linear_backward', 0.4)
-        self.declare_parameter('proportional_gain_angular_backward', 0.8)
+        self.declare_parameter('proportional_gain_linear_backward', 0.1)  # Proportional gain for backward linear velocity control
+        self.declare_parameter('proportional_gain_angular_backward', 0.2)  # Proportional gain for backward angular velocity control
 
         # Camera cutoff values for objects (approx metres)
         # Set max to high is wanna just catch all
-        self.declare_parameter('min_distance', 0.3)
-        self.declare_parameter('max_distance', 8.0)
+        self.declare_parameter('min_distance', 0.3)  # Minimum distance (m) for valid object detections
+        self.declare_parameter('max_distance', 8.0)  # Maximum distance (m) for valid object detections
 
         # Cluster performance
-        self.declare_parameter('cluster_distance', 2.0)
+        self.declare_parameter('cluster_distance', 0.5)  # DBSCAN epsilon (m) for clustering object positions
+        self.declare_parameter('min_observations', 2)  # Minimum number of observations to form a cluster
+        self.declare_parameter('min_variance_threshold', 0.01)  # Maximum allowed minimum variance for a cluster to be valid
 
-        # Filtering for runnders
-        self.declare_parameter('time_window', 10.0)
-        self.declare_parameter('min_observations', 5)  # how many observations to consider it the same object
-        self.declare_parameter('velocity_threshold', 1.0)  # when to consider an object moving (to ignore)
-        self.declare_parameter('match_radius', 0.5)  # How close has an object has to be 
-        self.declare_parameter('velocity_window', 1.0)
+        # Filtering for runners
+        self.declare_parameter('time_window', 10.0)  # Time window (s) for considering recent observations
+        self.declare_parameter('velocity_threshold', 0.7)  # Velocity (m/s) above which objects are considered moving and ignored
+        self.declare_parameter('match_radius', 0.5)  # Radius (m) for matching objects to previous observations
+        self.declare_parameter('velocity_window', 1.0)  # Time window (s) for velocity calculations
 
         # Debug logs all possible observations regardless of timestep in a csv for us to tune clustering
         # Do not use this in real world test cos of overhead
-        self.declare_parameter('debug_mode', False)
+        self.declare_parameter('debug_mode', True)  # Enable debug mode to log all observations to CSV
 
         self.waypoint_file = self.get_parameter('waypoint_file').value
         self.waypoint_tolerance = self.get_parameter('waypoint_tolerance').value
@@ -83,6 +85,12 @@ class WaypointNavigator(Node):
         self.match_radius = self.get_parameter('match_radius').value
         self.velocity_window = self.get_parameter('velocity_window').value
         self.debug_mode = self.get_parameter('debug_mode').value
+        self.min_variance_threshold = self.get_parameter('min_variance_threshold').value
+
+        if self.debug_mode:
+            self.get_logger().info(f"Running in DEBUG mode")
+        else:
+            self.get_logger().info(f"Runing in RUN mode")
 
         # Waypoint and navigation state
         self.waypoints = []
@@ -96,7 +104,7 @@ class WaypointNavigator(Node):
         self.recent_observations = []  # Sliding window for velocity filtering
         self.object_dict = {}
         self.object_id_counter = 0
-        self.mutex = Lock()
+        self.mutex = RLock()
 
         # Robot pose and transformations
         self.robot_pose = None
@@ -122,13 +130,14 @@ class WaypointNavigator(Node):
             ObjectsStamped,
             '/zed/zed_node/obj_det/objects',
             self.objects_callback,
-            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
+            5
         )
+
         self.odom_sub = self.create_subscription(
             PoseStamped,
             '/zed/zed_node/pose',
             self.odom_callback,
-            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
+            5
         )
         self.grid_sub = self.create_subscription(
             OccupancyGrid,
@@ -166,13 +175,13 @@ class WaypointNavigator(Node):
             pose = PoseStamped()
             pose.header.frame_id = 'map'
             pose.header.stamp = self.get_clock().now().to_msg()
-            pose.pose.position.x = float(wp['position']['x'])
-            pose.pose.position.y = float(wp['position']['y'])
-            pose.pose.position.z = float(wp['position']['z'])
-            pose.pose.orientation.x = float(wp['orientation']['x'])
-            pose.pose.orientation.y = float(wp['orientation']['y'])
-            pose.pose.orientation.z = float(wp['orientation']['z'])
-            pose.pose.orientation.w = float(wp['orientation']['w'])
+            pose.pose.position.x = float(wp['pose']['position']['x'])
+            pose.pose.position.y = float(wp['pose']['position']['y'])
+            pose.pose.position.z = float(wp['pose']['position']['z'])
+            pose.pose.orientation.x = float(wp['pose']['orientation']['x'])
+            pose.pose.orientation.y = float(wp['pose']['orientation']['y'])
+            pose.pose.orientation.z = float(wp['pose']['orientation']['z'])
+            pose.pose.orientation.w = float(wp['pose']['orientation']['w'])
             waypoints.append({
                 'id': wp['id'],
                 'pose': pose,
@@ -373,7 +382,9 @@ class WaypointNavigator(Node):
             # Proportional control
             cmd = Twist()
             is_backward = abs(angle_to_waypoint) > pi/2
-            if is_backward and self.is_backup_safe(robot_pos, robot_yaw):
+            if is_backward:
+                if not self.is_backup_safe(robot_pos, robot_yaw):
+                    self.get_logger().debug("Backup is not safe. Attempting reverse anyways.")
                 # Backward movement
                 cmd.linear.x = max(-self.proportional_gain_linear_backward * distance, -self.max_linear_velocity)
                 cmd.angular.z = min(
@@ -438,13 +449,31 @@ class WaypointNavigator(Node):
         Uses the covariance given by the messages as zed2 object detects,
         and a position covariance to determine the confidence of a reading (via variance - trace of covariance matrix)
         """
+        start_time = time.time()
         self.mutex.acquire()
+        mutex_acquire_time = time.time()
+        self.get_logger().debug(f"Objects callback: Acquired mutex after {mutex_acquire_time - start_time:.4f}s")
         try:
             if self.robot_pose is None or self.R_odom_camera is None:
                 self.get_logger().warn("Missing robot pose or odometry. Skipping object processing.")
                 return
             current_time = self.get_clock().now().nanoseconds / 1e9
             new_objects = []
+
+            # Log received message details
+            self.get_logger().debug(f"Received ObjectsStamped with {len(msg.objects)} objects, timestamp: {msg.header.stamp}")
+
+            # Check if pose and odometry are available - ignore until we get this
+            if self.robot_pose is None or self.R_odom_camera is None:
+                self.get_logger().warn("Missing robot pose or odometry. Skipping object processing.")
+                return
+
+            # Log all detected objects before filtering
+            detected_labels = [obj.label for obj in msg.objects]
+            if detected_labels:
+                self.get_logger().info(f"Raw detections: {len(detected_labels)} objects: {detected_labels}")
+            else:
+                self.get_logger().debug("No objects detected in this frame")
 
             for obj in msg.objects:
                 pos_odom = np.array([obj.position[0], obj.position[1], obj.position[2]])
@@ -455,6 +484,12 @@ class WaypointNavigator(Node):
                 if dist < self.min_distance or dist > self.max_distance:
                     continue
                 pos_map = self.R_map_camera @ pos_camera + self.t_map_camera
+
+                # Check for NaN in pos_map
+                if np.any(np.isnan(pos_map)):
+                    self.get_logger().warn(f"Discarding object {obj.label} due to NaN position: {pos_map}")
+                    continue
+
                 # Object covariance
                 obj_cov = np.array(obj.position_covariance).reshape(3, 3) if len(obj.position_covariance) == 9 else np.diag(obj.position_covariance[:3])
                 # Transform obj_cov to map frame
@@ -466,6 +501,7 @@ class WaypointNavigator(Node):
                 combined_cov = obj_cov_map + robot_cov_3d
                 variance = np.trace(combined_cov)
                 self.get_logger().debug(f"Object {obj.label}: obj_cov_trace={np.trace(obj_cov):.4f}, robot_cov_trace={np.trace(robot_cov_3d):.4f}, combined_cov_trace={variance:.4f}")
+                
                 new_objects.append({
                     'class': obj.label,
                     'position': pos_map.tolist(),
@@ -477,6 +513,7 @@ class WaypointNavigator(Node):
                 self.publish_shadow(obj_id=len(new_objects)-1, raw_obj=obj, pos_map=pos_map)
 
             if new_objects:
+                # TODO: Current bug - it doesn't continuously see people? This only prints once and then it gives up
                 self.get_logger().info(f"New objects: {[obj['class'] for obj in new_objects]}")
                 # Filter objects by velocity before clustering
                 filtered_objects = self.match_and_filter_objects(new_objects, current_time)
@@ -492,7 +529,7 @@ class WaypointNavigator(Node):
                 if observations:
                     recent_obs = [o for o in observations if current_time - o['timestamp'] <= self.time_window]
                     if recent_obs:
-                        nearest_obj = min(recent_obj, key=lambda o: sqrt(sum((np.array(o['position']) - self.t_map_camera)**2)))
+                        nearest_obj = min(recent_obs, key=lambda o: sqrt(sum((np.array(o['position']) - self.t_map_camera)**2)))
                         distance = sqrt(sum((np.array(nearest_obj['position'][:2]) - self.t_map_camera[:2])**2))
                         distance_msg = Float32(data=float(distance))
                         self.distance_pub.publish(distance_msg)
@@ -500,7 +537,11 @@ class WaypointNavigator(Node):
             self.mutex.release()
 
     def cluster_and_update_objects(self, new_objects):
-        """Cluster objects by position and update dictionary."""
+        """
+        Cluster objects by position and update dictionary, selecting the point closest to centroid and filtering by variance.
+        This methodology was figured out via doing data science on our debug mode csv.
+        We realized taking the min variance of cluster was prone to outliers.
+        """
         self.mutex.acquire()
         try:
             current_time = self.get_clock().now().nanoseconds / 1e9
@@ -540,11 +581,25 @@ class WaypointNavigator(Node):
                     if len(cluster_obs) < self.min_observations:
                         continue
 
-                    best_obs = min(cluster_obs, key=lambda o: o['variance'])
+                    # Check minimum variance in cluster
+                    min_var = min(o['variance'] for o in cluster_obs)
+                    if min_var > self.min_variance_threshold:
+                        self.get_logger().info(f"Skipping cluster of {cls} (label {label}) due to min variance {min_var:.4f} > threshold {self.min_variance_threshold}")
+                        continue
+
+                    # Compute centroid
+                    cluster_positions = np.array([o['position'][:2] for o in cluster_obs])
+                    centroid = np.mean(cluster_positions, axis=0)
+
+                    # Find observation closest to centroid
+                    distances = np.linalg.norm(cluster_positions - centroid, axis=1)
+                    best_idx = distances.argmin()
+                    best_obs = cluster_obs[best_idx]
+
                     self.object_dict[self.object_id_counter] = {
                         'class': best_obs['class'],
                         'position': best_obs['position'],
-                        'variance': best_obs['variance'],
+                        ' variance': best_obs['variance'],
                         'raw_obj': best_obs['raw_obj']
                     }
                     self.publish_shadow(

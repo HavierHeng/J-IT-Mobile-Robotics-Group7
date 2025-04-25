@@ -35,12 +35,17 @@ Because we know that in the RViz launched by Rtabmap, we can "Publish 2D Goal Po
 The last waypoint marked is always assumed to be the final goal pose.
 
 ### Waypoints - how to get there
+
+We use a custom utility to grab "Get 2D Pose" from RViz and save them as a yaml file of waypoints.
+
 This part needs us to tune 2 simple P controllers for linear and angular velocity based on the desired position and angle at waypoint
-- This is as our car has some drift, we need a P controller to at least pull it back to the waypoint
+- This is as our car has some drift, we need a P controller to at least pull it back to the waypoint.
 
 The linear.x are capped to 1.0, while angular.z are capped to -3.0 to 3.0. These were fixed in the microros code in the arduino.
 
-Car also has some funny issue with reversing.
+Car also has some funny issue with reversing. We have reverse logic if the desired waypoint is behind the car (in the back pi/2 radians)
+
+The movement to the waypoint always uses the RTabmap's better estimate of the robot pose. This helps us stop whereever we want as long as the P controller is tuned.
 
 ### Static world assumption - dynamic objects as noise rather than objects
 If we assume static world assumption, this means that observed objects with a velocity higher than some threshold is considered an invalid candidate.
@@ -76,4 +81,31 @@ We can do this by applying transforms to the covariances until all are in map fr
 
 Then if the variance (`tr(covariance)`) of the resulting covariance of the observation of an object is < the previous variance then update the entry in in the dictionary. The only problem is how to distinguish two objects of the same class detected, but this can be roughly figured out by the clustering the positions of the objects seen before saving into a CSV.
 
+# 
+
+# Tuning the DBScan to collapse all observations into candidate points
+## Usage of our matplotlib utility plotter
+To plot the graph against all_observations.csv
+`python3 analyze_dbscan.py ~/ros2_ws/all_observations_recorded2.csv --show --eps 0.5 --min_samples 2 --min_variance 0.01`
+
+This allows you to see what candidate clusters were considered and what is the lowest variance of the cluster.
+
+You can use this script to figure out the values of hyperparams for DBScan (think of it like a cluster radius) and minimum samples
+
+
+# Some observations and decision on DBScan values
+## Epsilon / Radius of cluster
+Use a small value to prevent clustering everything into the same cluster but not too small such that it makes too many clusters. 
+
+For the race track challenge, 0.5 does so well. In real since the goal point is like x=2.5, by some common sense scaling this kind makes sense between the distance of each object.
+
+## Min samples in cluster
+Min samples should be somewhat small, as the car sometimes doesn't see enough of the person. We set to 2 (1 is alright ish, but dangerous)
+
+## Which point represents the cluster - the min variance from our CSV or the closest point to centroid.
+
+Closest point to centroid is 100% better. Min variance is subject to outliers as we saw in one of our tests.
+
+## Min variance 
+Some cluster min variance is really high. From our observation, these usually represent outlier e.g smearing due to difficulty for YOLOv8 to see bounding box. As such, even though the cluster has points, we will want to drop the cluster altogether. This min variance threshold that works on our training sets is 0.01.
 
