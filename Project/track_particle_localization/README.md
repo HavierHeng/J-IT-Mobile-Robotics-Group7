@@ -1,5 +1,38 @@
 # Design of Part 2 solution - Simple Version using Rtabmap, no funny online path planning
 
+## To run Part 2
+1. Put folder into your workspace under `/<ros2_ws>/src/`
+
+2. Colcon build the new package: `colon build --symlink-install --packages-select track_particle_localization`
+    - Recommendation: Avoid building all packages, as it may include extra things already built - Zed2 takes quite long to do so.
+
+3. Open a new terminal. Source the workspace overlay if not already added to `.bashrc` : `source ~/ros_ws/install/local_setup.bash`
+
+4. Start remote control of RC Car
+    - open terminal: `remote_control`
+    - press reset button of arduino zero board
+    - Option 1:
+        - open new terminal:`ros2 run joy joy_node`
+        - open new terminal type: `ros2 run car_control car_control`
+
+    - Option 2:
+        - Run this command in terminal: `ros2 launch car_control car_control.launch.py`
+  
+5. For bounding box visualizer just use the one given in the practical and start rviz. Change the `common.yaml` file in the Zed2 package to use the bag classification model. In new terminals for each command:
+    - Start the given visualizer for bounding boxes: `ros2 run obj_det_visualizer obj_visualizer`
+
+
+    - Start the Zed2 camera: `ros2 launch zed_wrapper zed_camera.launch.py camera_model:=zed2`
+    - Start Rtabmap with the known map after: `ros2 something` - that one ya know with the rviz:=true and rtabmapviz:=true
+        - In RViz2, you can add the bounding boxes and shadow (this one is to show the corrected position of the object we use). We also publish path of our bot to go to waypoints.
+
+6. Start the node to control the car: `ros2 run track_particle_localization simple`
+    - Make sure the car is in autonomous mode by pressing the joycon O 
+
+7. Utilities:
+    - Waypoint crafting: Run `ros2 run pose_logger pose_listener`, and then open Rtabmap and Rviz in localization mode. Use "Get 2D Goal Pose" to draw arrows. Closing the pose_logger will create the yaml in whatever folder you are in.
+    - Tuning DBSCAN with matplotlib (+ visualization for whatever objects were observed for debugging): `python3 analyze_dbscan.py path/to/all_observations.csv --show --eps 0.5 --min_samples 2 --min_variance 0.01`
+
 ## Description of problem
 
 The problem consists of driving a robot around - either by hand or autonomously (though that is not the case for us). Then as the robot drives around, it will encounter objects of varying classfications - the goal is to return a CSV of most likely object classifications and positions in world map.
@@ -81,16 +114,31 @@ We can do this by applying transforms to the covariances until all are in map fr
 
 Then if the variance (`tr(covariance)`) of the resulting covariance of the observation of an object is < the previous variance then update the entry in in the dictionary. The only problem is how to distinguish two objects of the same class detected, but this can be roughly figured out by the clustering the positions of the objects seen before saving into a CSV.
 
-# 
+### Temporal filtering
+
+That's right, unlike all other groups we don't just filter by a min/max distance by Zed2 to drop off people.
+We in fact also filter by the velocity of objects and drop moving objects, since we can assume all objects in our world are static.
+This works via a sliding window of observations.
+You can see this in the debug messages as our node runs.
+
+The question is how do you know that an object is the same object if all you have are labels of objects?
+- Simply hardcode a threshold for max change to a position from previous timestamp before you consider it a separate entity.
+
+This was tested by having a runner run past us and then tuning the values for max velocity and threshold change of position for an object. 
+No false positives, get rekt noise from moving objects.
 
 # Tuning the DBScan to collapse all observations into candidate points
 ## Usage of our matplotlib utility plotter
 To plot the graph against all_observations.csv
-`python3 analyze_dbscan.py ~/ros2_ws/all_observations_recorded2.csv --show --eps 0.5 --min_samples 2 --min_variance 0.01`
+`python3 analyze_dbscan.py ~/ros2_ws/all_observations.csv --show --eps 0.5 --min_samples 2 --min_variance 0.01`
 
 This allows you to see what candidate clusters were considered and what is the lowest variance of the cluster.
 
 You can use this script to figure out the values of hyperparams for DBScan (think of it like a cluster radius) and minimum samples
+
+There are two samples in the `csv_output` folder. These were real world recordings of people in the scene
+1) Scene 1: Two people (one near, one far)
+2) Scene 2: Two people (one near, one far) and 1 Vehicle at the front
 
 
 # Some observations and decision on DBScan values
