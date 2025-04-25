@@ -24,12 +24,12 @@
 
     - Start the Zed2 camera: `ros2 launch zed_wrapper zed_camera.launch.py camera_model:=zed2`
     - Start Rtabmap with the known map after: `ros2 something` - that one ya know with the rviz:=true and rtabmapviz:=true
-        - In RViz2, you can add the bounding boxes and shadow (this one is to show the corrected position of the object we use). We also publish path of our bot to go to waypoints.
+        - In RViz2, you can add the bounding boxes and shadow (this one is to show the corrected position of the object we use). We also publish path of our bot to go to waypoints, but you can what waypoints its trying to go for via the logs too.
 
 6. Start the node to control the car: `ros2 run track_particle_localization simple`
     - Make sure the car is in autonomous mode by pressing the joycon O 
 
-7. Utilities:
+7. Utilities (required for debugging and setting up waypoint controls):
     - Waypoint crafting: Run `ros2 run pose_logger pose_listener`, and then open Rtabmap and Rviz in localization mode. Use "Get 2D Goal Pose" to draw arrows. Closing the pose_logger will create the yaml in whatever folder you are in.
     - Tuning DBSCAN with matplotlib (+ visualization for whatever objects were observed for debugging): `python3 analyze_dbscan.py path/to/all_observations.csv --show --eps 0.5 --min_samples 2 --min_variance 0.01`
 

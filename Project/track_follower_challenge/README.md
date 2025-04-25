@@ -4,6 +4,33 @@ This implements a lane detector + PID controller to keep our car in lane.
 
 The control system is always a PID controller - the PID parameters will be the same regardless of which implementation is chosen.
 
+
+## To run Part 1
+1. Put folder into your workspace under `/<ros2_ws>/src/`
+
+2. Colcon build the new package: `colon build --symlink-install --packages-select track_follower_challenge`
+    - Recommendation: Avoid building all packages, as it may include extra things already built - Zed2 takes quite long to do so.
+
+3. Open a new terminal. Source the workspace overlay if not already added to `.bashrc` : `source ~/ros_ws/install/local_setup.bash`
+
+4. Start remote control of RC Car
+    - open terminal: `remote_control`
+    - press reset button of arduino zero board
+    - Option 1:
+        - open new terminal:`ros2 run joy joy_node`
+        - open new terminal type: `ros2 run car_control car_control`
+
+    - Option 2:
+        - Run this command in terminal: `ros2 launch car_control car_control.launch.py`
+
+5. Start the Zed2 camera: `ros2 launch zed_wrapper zed_camera.launch.py camera_model:=zed2`
+
+6. Start the node to control the car: `ros2 run track_follower_challenge track_follower`
+    - If left and right lane is detected, the OpenCV window showing the hough lines will pop up
+    - You can also open `rviz` where we send the debug frames to `/debug/color/masked_image` - these contain the same thing as the OpenCV for recording
+    - Make sure the car is in autonomous mode by pressing the joycon O 
+
+
 ## Methods of implementation 
 ### Method 1: Uses the dumb dumb OpenCV Blob tracking way
 
