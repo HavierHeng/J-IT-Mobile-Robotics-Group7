@@ -12,16 +12,23 @@ from sklearn.cluster import DBSCAN
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-def load_observations(csv_file, time_window=10.0):
-    """Load and filter recent observations from CSV."""
+def load_observations(csv_file, time_window=600.0, min_variance=0.001):
+    """Load and filter recent observations from CSV, excluding high-variance points."""
     df = pd.read_csv(csv_file)
     df['Timestamp'] = df['Timestamp'].astype(float)
     max_time = df['Timestamp'].max()
     df = df[df['Timestamp'] >= max_time - time_window]
+    
+    if min_variance is not None:
+        initial_count = len(df)
+        df = df[df['Variance'] <= min_variance]
+        filtered_count = initial_count - len(df)
+        print(f"Filtered out {filtered_count} points with variance > {min_variance}")
+    
     return df
 
-def plot_clusters(df, eps=2.0, min_samples=5, output_file='global_dbscan.png', show=False, min_variance_threshold=None):
-    """Apply DBSCAN and plot observations colored by class, with centroids and min variance."""
+def plot_clusters(df, eps=0.5, min_samples=2, output_file='global_dbscan.png', show=False):
+    """Apply DBSCAN and plot observations colored by class, with centroids and all variances."""
     positions = df[['X', 'Y']].values
     clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(positions)
     labels = clustering.labels_
@@ -41,16 +48,12 @@ def plot_clusters(df, eps=2.0, min_samples=5, output_file='global_dbscan.png', s
         cluster_df = df[df['Cluster'] == label]
         min_var = cluster_df['Variance'].min()
 
-        if min_variance_threshold is not None and min_var > min_variance_threshold:
-            print(f"Skipping Cluster {label} due to min variance {min_var:.4f} > threshold {min_variance_threshold}")
-            continue
-
         cluster_points = cluster_df[['X', 'Y']].values
         centroid = np.mean(cluster_points, axis=0)
         
-        # Get the point closest to the centroid
+        # Get the point closest to the centroid within the cluster
         distances = np.linalg.norm(cluster_points - centroid, axis=1)
-        closest_idx = cluster_df.iloc[distances.argmin()].name
+        closest_idx = cluster_df.index[distances.argmin()]
         closest_point = cluster_df.loc[closest_idx]
 
         # Plot it with a distinct marker
@@ -79,6 +82,11 @@ def plot_clusters(df, eps=2.0, min_samples=5, output_file='global_dbscan.png', s
                     c='black', marker='*', s=250,
                     label='Min Variance Point' if label == min(set(labels)) else None)
 
+        # Add variance labels for all points in the cluster
+        for idx, row in cluster_df.iterrows():
+            plt.text(row['X'] + 0.05, row['Y'] + 0.05,
+                     f"{row['Variance']:.4f}",
+                     fontsize=8, color='black')
 
     plt.title(f'DBSCAN Clustering (eps={eps}, min_samples={min_samples})\nClusters: {n_clusters}, Noise: {n_noise}')
     plt.xlabel('X (m)')
@@ -102,29 +110,26 @@ def plot_clusters(df, eps=2.0, min_samples=5, output_file='global_dbscan.png', s
             continue
         cluster_df = df[df['Cluster'] == label]
         min_var = cluster_df['Variance'].min()
-        if min_variance_threshold is not None and min_var > min_variance_threshold:
-            continue
         print(f"Cluster {label}: {len(cluster_df)} points, Avg Var: {cluster_df['Variance'].mean():.4f}, Min Var: {min_var:.4f}")
-
 
 def main():
     parser = argparse.ArgumentParser(description="Visualize DBSCAN clustering across all object classes.")
     parser.add_argument('csv_file', help='Path to the observations CSV file.')
-    parser.add_argument('--eps', type=float, default=2.0, help='DBSCAN epsilon parameter (default: 2.0)')
-    parser.add_argument('--min_samples', type=int, default=5, help='DBSCAN min_samples parameter (default: 5)')
-    parser.add_argument('--time_window', type=float, default=10.0, help='Time window in seconds (default: 10.0)')
-    parser.add_argument('--min_variance', type=float, default=None,
-                    help='Ignore clusters with min variance above this threshold')
+    parser.add_argument('--eps', type=float, default=0.5, help='DBSCAN epsilon parameter (default: 0.5)')
+    parser.add_argument('--min_samples', type=int, default=2, help='DBSCAN min_samples parameter (default: 2)')
+    parser.add_argument('--time_window', type=float, default=600.0, help='Time window in seconds (default: 600.0)')
+    parser.add_argument('--min_variance', type=float, default=0.001,
+                        help='Exclude points with variance above this threshold before clustering (default: 0.001)')
     parser.add_argument('--show', action='store_true', help='Show plot instead of saving to file')
     args = parser.parse_args()
 
-    df = load_observations(args.csv_file, args.time_window)
+    df = load_observations(args.csv_file, args.time_window, args.min_variance)
     if df.empty:
-        print("No observations found in the given time window.")
+        print("No observations found after filtering.")
         return
 
     output_file = f'global_dbscan_eps{args.eps}_min{args.min_samples}.png'
-    plot_clusters(df, args.eps, args.min_samples, output_file=output_file, show=args.show, min_variance_threshold=args.min_variance)
+    plot_clusters(df, args.eps, args.min_samples, output_file=output_file, show=args.show)
 
 if __name__ == '__main__':
     main()
