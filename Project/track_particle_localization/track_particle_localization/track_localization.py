@@ -35,8 +35,9 @@ class WaypointNavigator(Node):
         self.declare_parameter('max_linear_velocity', 1.0)  # Maximum linear speed (m/s) for robot movement
         self.declare_parameter('max_angular_velocity', 3.0)  # Maximum angular speed (rad/s) for robot rotation
 
-        # Forwards Proportional turn is quite rigid
+        # Proportional control gains
         # TODO: Maybe okay already - cos we tested these 
+        # Can lower linear gain if want to move slower to waypoint
         self.declare_parameter('proportional_gain_linear', 0.1)  # Proportional gain for forward linear velocity control
         self.declare_parameter('proportional_gain_angular', 0.08)  # Proportional gain for forward angular velocity control
 
@@ -54,16 +55,16 @@ class WaypointNavigator(Node):
         # Cluster performance
         self.declare_parameter('cluster_distance', 0.5)  # DBSCAN epsilon (m) for clustering object positions
         self.declare_parameter('min_observations', 2)  # Minimum number of observations to form a cluster
-        self.declare_parameter('min_variance_threshold', 0.01)  # Maximum allowed minimum variance for a cluster to be valid
+        self.declare_parameter('max_variance', 0.001)  # Maximum allowed variance for a point to be considered for clustering
 
         # Filtering for runners
-        self.declare_parameter('time_window', 200.0)  # Time window (s) for considering recent observations
+        self.declare_parameter('time_window', 600.0)  # Time window (s) for considering recent observations
         self.declare_parameter('velocity_threshold', 0.7)  # Velocity (m/s) above which objects are considered moving and ignored
         self.declare_parameter('match_radius', 0.5)  # Radius (m) for matching objects to previous observations
         self.declare_parameter('velocity_window', 1.0)  # Time window (s) for velocity calculations
 
         # Debug logs all possible observations regardless of timestep in a csv for us to tune clustering
-        # Do not use this in real world test cos of overhead
+        # Not recommend use this in real world over very long periods of time cos of overhead - but in our case, its short enough
         self.declare_parameter('debug_mode', True)  # Enable debug mode to log all observations to CSV
 
         self.waypoint_file = self.get_parameter('waypoint_file').value
@@ -85,12 +86,12 @@ class WaypointNavigator(Node):
         self.match_radius = self.get_parameter('match_radius').value
         self.velocity_window = self.get_parameter('velocity_window').value
         self.debug_mode = self.get_parameter('debug_mode').value
-        self.min_variance_threshold = self.get_parameter('min_variance_threshold').value
+        self.max_variance = self.get_parameter('max_variance').value
 
         if self.debug_mode:
             self.get_logger().info(f"Running in DEBUG mode")
         else:
-            self.get_logger().info(f"Runing in RUN mode")
+            self.get_logger().info(f"Running in RUN mode")
 
         # Waypoint and navigation state
         self.waypoints = []
@@ -513,7 +514,6 @@ class WaypointNavigator(Node):
                 self.publish_shadow(obj_id=len(new_objects)-1, raw_obj=obj, pos_map=pos_map)
 
             if new_objects:
-                # TODO: Current bug - it doesn't continuously see people? This only prints once and then it gives up
                 self.get_logger().info(f"New objects: {[obj['class'] for obj in new_objects]}")
                 # Filter objects by velocity before clustering
                 filtered_objects = self.match_and_filter_objects(new_objects, current_time)
@@ -538,9 +538,10 @@ class WaypointNavigator(Node):
 
     def cluster_and_update_objects(self, new_objects):
         """
-        Cluster objects by position and update dictionary, selecting the point closest to centroid and filtering by variance.
+        Cluster objects by position and update dictionary, filtering high-variance points before clustering.
+        Points with variance > max_variance are excluded to remove noisy readings (e.g., due to vehicle drift).
         This methodology was figured out via doing data science on our debug mode csv.
-        We realized taking the min variance of cluster was prone to outliers.
+        We realized taking the min variance of cluster was prone to outliers so now we take the closest point in cluster.
         """
         self.mutex.acquire()
         try:
@@ -549,11 +550,21 @@ class WaypointNavigator(Node):
             observations = self.all_observations if self.debug_mode else self.recent_observations
             # Prune to time_window
             observations = [o for o in observations if current_time - o['timestamp'] <= self.time_window]
+            # Filter out high-variance points
+            initial_count = len(observations)
+            observations = [o for o in observations if o['variance'] <= self.max_variance]
+            filtered_count = initial_count - len(observations)
+            if filtered_count > 0:
+                self.get_logger().info(f"Filtered out {filtered_count} observations with variance > {self.max_variance}")
+
+            # Add new objects to observations (after filtering them for variance)
+            new_objects = [o for o in new_objects if o['variance'] <= self.max_variance]
+            observations.extend(new_objects)
+
             if not self.debug_mode:
                 self.recent_observations = observations
-            # Add new objects to observations
-            observations.extend(new_objects)
             if not observations:
+                self.get_logger().debug("No observations after filtering for clustering")
                 return
 
             class_groups = {}
@@ -569,6 +580,7 @@ class WaypointNavigator(Node):
             for cls, cls_observations in class_groups.items():
                 positions = np.array([o['position'][:2] for o in cls_observations])
                 if len(positions) < self.min_observations:
+                    self.get_logger().debug(f"Skipping {cls}: insufficient observations ({len(positions)} < {self.min_observations})")
                     continue
 
                 clustering = DBSCAN(eps=self.cluster_distance, min_samples=self.min_observations).fit(positions)
@@ -579,12 +591,6 @@ class WaypointNavigator(Node):
                         continue
                     cluster_obs = [o for i, o in enumerate(cls_observations) if labels[i] == label]
                     if len(cluster_obs) < self.min_observations:
-                        continue
-
-                    # Check minimum variance in cluster
-                    min_var = min(o['variance'] for o in cluster_obs)
-                    if min_var > self.min_variance_threshold:
-                        self.get_logger().info(f"Skipping cluster of {cls} (label {label}) due to min variance {min_var:.4f} > threshold {self.min_variance_threshold}")
                         continue
 
                     # Compute centroid
