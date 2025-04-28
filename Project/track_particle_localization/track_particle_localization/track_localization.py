@@ -53,15 +53,16 @@ class WaypointNavigator(Node):
         self.declare_parameter('max_distance', 8.0)  # Maximum distance (m) for valid object detections
 
         # Cluster performance
-        self.declare_parameter('cluster_distance', 0.5)  # DBSCAN epsilon (m) for clustering object positions
         self.declare_parameter('min_observations', 2)  # Minimum number of observations to form a cluster
         self.declare_parameter('max_variance', 0.001)  # Maximum allowed variance for a point to be considered for clustering
 
         # Filtering for runners
         self.declare_parameter('time_window', 600.0)  # Time window (s) for considering recent observations
         self.declare_parameter('velocity_threshold', 0.7)  # Velocity (m/s) above which objects are considered moving and ignored
-        self.declare_parameter('match_radius', 0.5)  # Radius (m) for matching objects to previous observations
         self.declare_parameter('velocity_window', 1.0)  # Time window (s) for velocity calculations
+
+        # Filtering + Cluster Dual Use - Distance to match two observations as the same object (m)
+        self.declare_parameter('group_distance', 0.5)  # Radius (m) for matching objects to previous observations, aka DBSCAN epsilon radius (m) for clustering object positions. This determines how close two objects have to be to be considered the same object.
 
         # Debug logs all possible observations regardless of timestep in a csv for us to tune clustering
         # Not recommend use this in real world over very long periods of time cos of overhead - but in our case, its short enough
@@ -78,12 +79,12 @@ class WaypointNavigator(Node):
         self.proportional_gain_angular_backward = self.get_parameter('proportional_gain_angular_backward').value
         self.min_distance = self.get_parameter('min_distance').value
         self.max_distance = self.get_parameter('max_distance').value
-        self.cluster_distance = self.get_parameter('cluster_distance').value
+        self.cluster_distance = self.get_parameter('group_distance').value  # dbscan epsilon cluster distance == group_distance
         self.backup_safety_distance = self.get_parameter('backup_safety_distance').value
         self.time_window = self.get_parameter('time_window').value
         self.min_observations = self.get_parameter('min_observations').value
         self.velocity_threshold = self.get_parameter('velocity_threshold').value
-        self.match_radius = self.get_parameter('match_radius').value
+        self.match_radius = self.get_parameter('group_distance').value  # match radius for velocity filter to determine if two objects of same class is the same == group_distance
         self.velocity_window = self.get_parameter('velocity_window').value
         self.debug_mode = self.get_parameter('debug_mode').value
         self.max_variance = self.get_parameter('max_variance').value
