@@ -74,6 +74,11 @@ def plot_clusters(df, eps=0.5, min_samples=2, output_file='global_dbscan.png', s
         plt.scatter(centroid[0], centroid[1], c='red', marker='x', s=200,
                     label='Centroid' if label == min(set(labels)) else None)
 
+        # Annotate its centroid position 
+        plt.text(centroid[0] + 0.1, centroid[1] - 0.1,
+                 f"Centroid (x, y):\n({centroid[0]:.4f}, \n{centroid[1]:.4f})",
+                 fontsize=9, color='red')
+
         # Min variance label at centroid
         plt.text(centroid[0] + 0.1, centroid[1] + 0.1,
                  f"min var: {min_var:.4f}",
