@@ -11,6 +11,7 @@ import numpy as np
 from sklearn.cluster import DBSCAN
 import matplotlib.pyplot as plt
 import seaborn as sns
+import csv
 
 def load_observations(csv_file, time_window=600.0, min_variance=0.001):
     """Load and filter recent observations from CSV, excluding high-variance points."""
@@ -36,6 +37,9 @@ def plot_clusters(df, eps=0.5, min_samples=2, output_file='global_dbscan.png', s
     df['Cluster'] = labels
     n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
     n_noise = list(labels).count(-1)
+
+    # Prepare data for objects.csv-like output
+    objects_data = []
 
     # Plot
     plt.figure(figsize=(12, 10))
@@ -88,6 +92,16 @@ def plot_clusters(df, eps=0.5, min_samples=2, output_file='global_dbscan.png', s
                      f"{row['Variance']:.4f}",
                      fontsize=8, color='black')
 
+        # Store data for objects.csv-like output
+        objects_data.append({
+            'Cluster_ID': label,
+            'Class': cluster_df['Class'].iloc[0],  # Assume all points in cluster have same class
+            'X': centroid[0],
+            'Y': centroid[1],
+            'Z': closest_point['Z'],
+            'Variance': closest_point['Variance']
+        })
+
     plt.title(f'DBSCAN Clustering (eps={eps}, min_samples={min_samples})\nClusters: {n_clusters}, Noise: {n_noise}')
     plt.xlabel('X (m)')
     plt.ylabel('Y (m)')
@@ -110,7 +124,23 @@ def plot_clusters(df, eps=0.5, min_samples=2, output_file='global_dbscan.png', s
             continue
         cluster_df = df[df['Cluster'] == label]
         min_var = cluster_df['Variance'].min()
-        print(f"Cluster {label}: {len(cluster_df)} points, Avg Var: {cluster_df['Variance'].mean():.4f}, Min Var: {min_var:.4f}")
+        centroid = np.mean(cluster_df[['X', 'Y']].values, axis=0)
+        print(f"Cluster {label}: {len(cluster_df)} points, Avg Var: {cluster_df['Variance'].mean():.4f}, Min Var: {min_var:.4f}, Centroid: ({centroid[0]:.4f}, {centroid[1]:.4f})")
+
+    # Save objects.csv-like output
+    with open('dbscan_objects.csv', 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['Cluster_ID', 'Class', 'X', 'Y', 'Z', 'Variance'])
+        for obj in objects_data:
+            writer.writerow([
+                obj['Cluster_ID'],
+                obj['Class'],
+                obj['X'],
+                obj['Y'],
+                obj['Z'],
+                obj['Variance']
+            ])
+    print("Saved cluster data to dbscan_objects.csv")
 
 def main():
     parser = argparse.ArgumentParser(description="Visualize DBSCAN clustering across all object classes.")

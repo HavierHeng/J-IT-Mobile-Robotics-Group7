@@ -603,16 +603,17 @@ class WaypointNavigator(Node):
                     best_idx = distances.argmin()
                     best_obs = cluster_obs[best_idx]
 
+                    # Use centroid for X, Y position, keep Z from closest point
                     self.object_dict[self.object_id_counter] = {
                         'class': best_obs['class'],
-                        'position': best_obs['position'],
+                        'position': [centroid[0], centroid[1], best_obs['position'][2]],
                         'variance': best_obs['variance'],
                         'raw_obj': best_obs['raw_obj']
                     }
                     self.publish_shadow(
                         obj_id=self.object_id_counter,
                         raw_obj=best_obs['raw_obj'],
-                        pos_map=np.array(best_obs['position'])
+                        pos_map=np.array([centroid[0], centroid[1], best_obs['position'][2]])
                     )
                     self.object_id_counter += 1
 
