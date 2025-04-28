@@ -133,19 +133,20 @@ def plot_clusters(df, eps=0.5, min_samples=2, output_file='global_dbscan.png', s
         print(f"Cluster {label}: {len(cluster_df)} points, Avg Var: {cluster_df['Variance'].mean():.4f}, Min Var: {min_var:.4f}, Centroid: ({centroid[0]:.4f}, {centroid[1]:.4f})")
 
     # Save objects.csv-like output
-    with open('dbscan_objects.csv', 'w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(['Cluster_ID', 'Class', 'X', 'Y', 'Z', 'Variance'])
-        for obj in objects_data:
-            writer.writerow([
-                obj['Cluster_ID'],
-                obj['Class'],
-                obj['X'],
-                obj['Y'],
-                obj['Z'],
-                obj['Variance']
-            ])
-    print("Saved cluster data to dbscan_objects.csv")
+    if not show:
+        with open('dbscan_objects.csv', 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['Cluster_ID', 'Class', 'X', 'Y', 'Z', 'Variance'])
+            for obj in objects_data:
+                writer.writerow([
+                    obj['Cluster_ID'],
+                    obj['Class'],
+                    obj['X'],
+                    obj['Y'],
+                    obj['Z'],
+                    obj['Variance']
+                ])
+        print("Saved cluster data to dbscan_objects.csv")
 
 def main():
     parser = argparse.ArgumentParser(description="Visualize DBSCAN clustering across all object classes.")
