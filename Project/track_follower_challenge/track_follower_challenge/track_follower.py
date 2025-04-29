@@ -58,25 +58,25 @@ class LaneFollowing(Node):
         self.error = 0.0
 
         # Declare PID parameters
-        self.declare_parameter('Kp', 0.06)  # Proportional gain 
-        self.declare_parameter('Kd', 0.03)    # Derivative gain
-        self.declare_parameter('Ki', 0.0001)  # Integral gain
+        self.declare_parameter('Kp', 0.015)  # Proportional gain 
+        self.declare_parameter('Kd', 0.015)    # Derivative gain
+        self.declare_parameter('Ki', 0.0000)  # Integral gain
         self.declare_parameter('forward_speed', 1.0)  # Forward speed - In theory, we would want throttle to be 1 (highest speed 1/10 car can tahan)
 
         Kp = self.get_parameter('Kp').value
         Kd = self.get_parameter('Kd').value
         Ki = self.get_parameter('Ki').value
+        self.bias = 9.0  # our car has funnjy drift not sure if linear - higher means it turns more left- 9.0 for straights
         self.forward_speed = self.get_parameter('forward_speed').value
-
+        # 8.5 straights, 9.0 for turns
         self.pid_controller = PID(Kp, Kd, Ki)
 
-        # Cache old values - needed since car doesn't see left/right lanes every frame consistently 
+        # Cache old values
         self.left_lane = None
         self.right_lane = None
 
         # Threshold for when to update error
         self.max_error_change = 20  # How much max pixel jump between updates
-        self.bias = 9.0  # our car has funnjy drift not sure if linear - higher means more right bias - 9.0 for straights
 
         # Create subscription to camera images
         # Use the rectified image from the Zed2 camera
@@ -166,6 +166,8 @@ class LaneFollowing(Node):
         # Don't ask why. Do not comment out the bilateral filter else noisy.
         gray_masked = cv2.bilateralFilter(gray_masked, 6, 25, 25)  # makes colour similoar or something - easier to contrast and group similar greys
 
+        cv2.imshow("bilateral filter", gray_masked)
+        cv2.waitKey(1)
 
         # Enhance contrast: Contrast stretching
         min_val, max_val = np.percentile(gray_masked[mask > 0], [50, 98])  # Avoid outliers - higher the first value, the more aggressive it changes greys to blacks (black point), higher second value means that less whitish pixels are whites
@@ -246,8 +248,15 @@ class LaneFollowing(Node):
 
         # if left_fit is not None and right_fit is not None:
         #     self.get_logger().info("Found left and right")
-        if self.left_lane is None or self.right_lane is None:
-            return
+        if self.left_lane is None: 
+            #TODO: add logic to pull back based on None and send cmd -> return
+            self.error = -20 + self.bias
+        if self.right_lane is None:
+            self.error = 15 + self.bias
+
+        if self.left_lane is None and self.right_lane is None:
+            self.error = self.bias
+
 
         # If both lines exist, compute vanishing point and CTE for PID
         # Vanishing point tells us the direction to chase
